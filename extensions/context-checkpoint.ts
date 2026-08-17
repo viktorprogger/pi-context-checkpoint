@@ -21,7 +21,7 @@ import {
 } from "../src/checkpoint-core.ts";
 
 const TOOL_NAME = "checkpoint_context";
-const FALLBACK_COMMAND = "checkpoint_context_internal_fallback";
+const RECOVERY_COMMAND = "checkpoint_context_recover";
 const CHECKPOINT_DETAILS_VERSION = 1;
 
 const CheckpointParameters = Type.Object({
@@ -67,7 +67,7 @@ function normalizeFields(params: CheckpointParameters): CheckpointFields {
 }
 
 function resolveComplete(modelRegistry: ExtensionContext["modelRegistry"]): CompletionFunction {
-  // Pi 0.74 does not declare this method; keep the compatibility assertion at this call boundary only.
+  // Keep the runtime check at this call boundary for installations with stale declarations or runtimes.
   const complete = (modelRegistry as unknown as { complete?: CompletionFunction }).complete;
   if (typeof complete !== "function") {
     throw new Error(
@@ -94,18 +94,17 @@ function checkpointResult(state: CheckpointState): {
 export default function contextCheckpoint(pi: ExtensionAPI): void {
   let waitingForTurnEnd: CheckpointState | undefined;
   let compactionInFlight: CheckpointState | undefined;
-  let fallbackCheckpoint: CheckpointState | undefined;
-  let fallbackQueued = false;
+  let pendingRecovery: CheckpointState | undefined;
+  let recoveryInFlight = false;
   let generationInFlight = false;
 
   const notify = (ctx: ExtensionContext, message: string, type: "info" | "warning" | "error" = "info") => {
     if (ctx.hasUI) ctx.ui.notify(message, type);
   };
 
-  const queueFallback = (ctx: ExtensionContext, checkpoint: CheckpointState, reason: unknown): void => {
+  const queueRecovery = (ctx: ExtensionContext, checkpoint: CheckpointState, reason: unknown): void => {
     if (
-      fallbackQueued ||
-      fallbackCheckpoint ||
+      pendingRecovery ||
       !compactionInFlight ||
       compactionInFlight.toolCallId !== checkpoint.toolCallId ||
       ctx.signal?.aborted
@@ -114,34 +113,25 @@ export default function contextCheckpoint(pi: ExtensionAPI): void {
     }
 
     compactionInFlight = undefined;
-    fallbackCheckpoint = checkpoint;
-    fallbackQueued = true;
-    try {
-      pi.sendUserMessage(`/${FALLBACK_COMMAND}`, { deliverAs: "followUp" });
-    } catch (error) {
-      fallbackCheckpoint = undefined;
-      fallbackQueued = false;
-      notify(ctx, `Checkpoint compaction failed and fallback could not be queued: ${errorMessage(error)}`, "error");
-      return;
-    }
-    notify(ctx, `Checkpoint compaction failed; queued a replacement session fallback (${errorMessage(reason)}).`, "warning");
+    pendingRecovery = checkpoint;
+    notify(ctx, `Checkpoint compaction failed (${errorMessage(reason)}). Run /${RECOVERY_COMMAND} to start a replacement session.`, "warning");
   };
 
-  pi.registerCommand(FALLBACK_COMMAND, {
-    description: "Internal checkpoint recovery command",
+  pi.registerCommand(RECOVERY_COMMAND, {
+    description: "Recover from a failed checkpoint compaction in a replacement session",
     handler: async (_args, ctx) => {
-      const pending = fallbackCheckpoint;
-      fallbackCheckpoint = undefined;
-      fallbackQueued = false;
-      if (!pending) return;
+      const pending = pendingRecovery;
+      if (!pending || recoveryInFlight) return;
       if (ctx.signal?.aborted) {
-        notify(ctx, "Checkpoint replacement fallback was aborted.", "error");
+        notify(ctx, "Checkpoint replacement recovery was aborted.", "error");
         return;
       }
+      recoveryInFlight = true;
 
       // Keep these plain values in the command closure before replacement tears down this extension instance.
       const summary = String(pending.summary);
       const parentSession = ctx.sessionManager.getSessionFile();
+      notify(ctx, "Starting checkpoint replacement recovery.", "warning");
       try {
         const result = await ctx.newSession({
           parentSession,
@@ -156,9 +146,17 @@ export default function contextCheckpoint(pi: ExtensionAPI): void {
             notify(replacementCtx, "Started a replacement session seeded with the final checkpoint.", "warning");
           },
         });
-        if (result.cancelled) notify(ctx, "Checkpoint replacement session was cancelled.", "error");
+        if (result.cancelled) {
+          // The original context may have been invalidated even when replacement is cancelled.
+          console.error("Checkpoint replacement session was cancelled; recovery can be retried.");
+        } else {
+          pendingRecovery = undefined;
+        }
       } catch (error) {
-        notify(ctx, `Checkpoint replacement session failed: ${errorMessage(error)}`, "error");
+        // Do not use the original context here: newSession may have replaced or torn down it.
+        console.error(`Checkpoint replacement session failed: ${errorMessage(error)}`);
+      } finally {
+        recoveryInFlight = false;
       }
     },
   });
@@ -166,8 +164,8 @@ export default function contextCheckpoint(pi: ExtensionAPI): void {
   pi.on("session_start", async (_event, _ctx) => {
     waitingForTurnEnd = undefined;
     compactionInFlight = undefined;
-    fallbackCheckpoint = undefined;
-    fallbackQueued = false;
+    pendingRecovery = undefined;
+    recoveryInFlight = false;
     generationInFlight = false;
   });
 
@@ -189,7 +187,7 @@ export default function contextCheckpoint(pi: ExtensionAPI): void {
       _onUpdate: unknown,
       ctx: ExtensionContext,
     ) {
-      if (generationInFlight || waitingForTurnEnd || compactionInFlight || fallbackCheckpoint || fallbackQueued) {
+      if (generationInFlight || waitingForTurnEnd || compactionInFlight || pendingRecovery || recoveryInFlight) {
         throw new Error("checkpoint_context is already generating or compacting a checkpoint.");
       }
       generationInFlight = true;
@@ -252,10 +250,10 @@ export default function contextCheckpoint(pi: ExtensionAPI): void {
         onComplete: () => {
           if (compactionInFlight?.toolCallId === checkpoint.toolCallId) compactionInFlight = undefined;
         },
-        onError: (error) => queueFallback(ctx, checkpoint, error),
+        onError: (error) => queueRecovery(ctx, checkpoint, error),
       });
     } catch (error) {
-      queueFallback(ctx, checkpoint, error);
+      queueRecovery(ctx, checkpoint, error);
     }
   });
 

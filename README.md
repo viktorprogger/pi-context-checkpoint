@@ -41,15 +41,13 @@ export PI_CHECKPOINT_MODEL=provider/model
 
 The override is resolved with `modelRegistry.find(provider, modelId)`. Missing models, missing authentication, missing active models, malformed overrides, and empty model output fail with explicit errors. Each of the three nested requests receives the tool abort signal, a fresh UUIDv7 session ID, and `cacheRetention: "none"`.
 
-## Fallback
+## Recovery after compaction errors
 
-Pi's compaction API is asynchronous. If its completion callback reports an error—including the short-session `nothing to compact` case—the extension queues an internal follow-up through `pi.sendUserMessage` and registers a unique command whose handler creates a replacement session seeded with the final checkpoint as a user message. UI notifications are emitted only when `ctx.hasUI` is true.
-
-Important compatibility limitation: Pi 0.74 and the active 0.84 runtime currently call `sendUserMessage` with command parsing disabled, so a queued slash-command message is treated as ordinary user text rather than dispatched to the registered handler. Automatic replacement fallback therefore requires a runtime command-dispatch path that is not exposed by the current ExtensionAPI; the code keeps `newSession()` confined to the command handler rather than using an unsafe ordinary event context workaround.
+Pi's compaction API is asynchronous. If its completion callback reports an error—including the short-session `nothing to compact` case—the extension retains one pending checkpoint and, when a UI is available, tells you to run the exact command `/checkpoint_context_recover`. The command handler safely creates a replacement session and seeds it with the final checkpoint summary. Recovery is manual because Pi 0.84.x disables slash-command expansion for extension-originated `sendUserMessage()` calls; this extension never sends that automatic fallback message or calls `newSession()` from an ordinary lifecycle event. Duplicate recovery requests are ignored, and a new session clears stale pending state.
 
 ## Limitations and API uncertainty
 
-- The implementation intentionally calls `ctx.modelRegistry.complete`, not `pi-ai.complete`. The local dependency/declaration baseline is coding-agent `0.74.0`, which omits this method; the active CLI used during development is `0.84.1`, where the runtime exposes it. This declaration/runtime boundary is version-sensitive: the extension performs one narrow structural check and fails clearly when the method is unavailable. Use a runtime that provides `modelRegistry.complete` for model-backed checkpoints.
+- The implementation calls the public `ctx.modelRegistry.complete` API (Pi 0.84.x), not `pi-ai.complete`. Use Pi 0.84.x or newer; the extension performs one narrow structural check and fails clearly when the method is unavailable.
 - Tool-result `usage` and `terminate` fields are runtime-compatible extension fields. Older Pi versions whose declarations/runtime predate those fields may not account for nested usage or stop after the tool; the extension does not silently substitute another completion API.
 - The read-only session manager is never mutated while generating a checkpoint. The active context is rebuilt with the public `buildSessionContext(ctx.sessionManager.getBranch())` path before conversion and serialization.
 - The extension deliberately makes exactly three sequential completion requests on a successful tool execution. It does not retry nested calls or compact during tool execution.
@@ -60,4 +58,6 @@ Important compatibility limitation: Pi 0.74 and the active 0.84 runtime currentl
 ```bash
 npm test
 npm run check
+node -e "import('./extensions/context-checkpoint.ts')"
+npm pack --dry-run
 ```
