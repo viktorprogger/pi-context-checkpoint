@@ -1,0 +1,17 @@
+$schema: 'https://raw.githubusercontent.com/context-hub/generator/refs/heads/main/json-schema.json'
+documents:
+  -
+    description: 'Project Structure'
+    outputPath: project-structure.md
+    overwrite: true
+    sources:
+      -
+        type: tree
+        description: 'Project Directory Structure'
+        sourcePaths:
+          - .
+        filePattern: '*'
+        renderFormat: ascii
+        enabled: true
+        showCharCount: true
+        maxDepth: 3
