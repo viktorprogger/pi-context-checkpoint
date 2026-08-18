@@ -13,7 +13,7 @@ import {
   findFirstKeptEntryId,
   runCheckpointPasses,
   selectCheckpointModel,
-  serializeCheckpointContext,
+  prepareCheckpointMessages,
   sumUsage,
   type CheckpointFields,
   type CompletionFunction,
@@ -200,7 +200,9 @@ export default function contextCheckpoint(pi: ExtensionAPI): void {
         );
         const complete = resolveComplete(ctx.modelRegistry);
         const sessionContext = buildSessionContext(ctx.sessionManager.getBranch());
-        const serializedConversation = serializeCheckpointContext(sessionContext.messages);
+        // execute() runs before the assistant tool call/result is persisted. Copy only the
+        // context before that in-flight call; never mutate the read-only active session.
+        const conversation = prepareCheckpointMessages(sessionContext.messages, toolCallId);
         const fields = normalizeFields(params);
 
         // runCheckpointPasses makes exactly three explicit, sequential calls: draft, independent review, final synthesis.
@@ -208,7 +210,7 @@ export default function contextCheckpoint(pi: ExtensionAPI): void {
           complete,
           model,
           fields,
-          serializedConversation,
+          conversation,
           signal,
           uuidv7,
         );

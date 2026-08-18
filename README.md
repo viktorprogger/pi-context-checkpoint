@@ -1,6 +1,6 @@
 # pi-context-checkpoint
 
-`pi-context-checkpoint` adds an LLM-callable `checkpoint_context` tool for durable engineering phase checkpoints. It captures Pi's active, compaction-aware conversation plus explicit progress fields, runs a draft/evidence pass, an independent omissions/contradictions review, and a final synthesis, then terminates the current turn.
+`pi-context-checkpoint` adds an LLM-callable `checkpoint_context` tool for durable engineering phase checkpoints. It passes Pi's active, compaction-aware LLM message sequence directly as structured messages (rather than serializing the conversation), plus explicit progress fields. It runs three sequential chained future-self continuation passes—checkpoint, reflection/correction, and final continuation note—then terminates the current turn.
 
 ## Install
 
@@ -29,7 +29,7 @@ Ask the agent to call `checkpoint_context` at a phase boundary and provide:
 - `nextActions` — immediate next actions;
 - `notes` — decisions, blockers, open questions, and other relevant facts.
 
-The tool returns the final checkpoint as its result, persists the summary in tool details, and returns `terminate: true` so Pi does not make an unnecessary follow-up model call. After the tool result is persisted, the extension requests compaction and supplies the generated checkpoint as the compaction summary.
+The tool returns the final checkpoint as its result, persists the summary in tool details, and returns `terminate: true` so Pi does not make an unnecessary follow-up model call. While `execute()` is running, the incomplete `checkpoint_context` assistant tool-call message and everything after it are omitted from a copied context; the active read-only session is never mutated. Each nested request uses the prior generated answer as a structured assistant message. After the tool result is persisted, the extension requests compaction and supplies only the final continuation note as the compaction summary; draft and reflection remain ephemeral except for aggregated usage/details.
 
 ## Configuration
 
@@ -49,9 +49,10 @@ Pi's compaction API is asynchronous. If its completion callback reports an error
 
 - The implementation calls the public `ctx.modelRegistry.complete` API (Pi 0.84.x), not `pi-ai.complete`. Use Pi 0.84.x or newer; the extension performs one narrow structural check and fails clearly when the method is unavailable.
 - Tool-result `usage` and `terminate` fields are runtime-compatible extension fields. Older Pi versions whose declarations/runtime predate those fields may not account for nested usage or stop after the tool; the extension does not silently substitute another completion API.
-- The read-only session manager is never mutated while generating a checkpoint. The active context is rebuilt with the public `buildSessionContext(ctx.sessionManager.getBranch())` path before conversion and serialization.
+- The read-only session manager is never mutated while generating a checkpoint. The active context is rebuilt with the public `buildSessionContext(ctx.sessionManager.getBranch())` path, converted to structured LLM messages, and truncated before the in-flight tool call.
 - The extension deliberately makes exactly three sequential completion requests on a successful tool execution. It does not retry nested calls or compact during tool execution.
-- Serialized conversation text and intermediate draft/review text are delimited as untrusted evidence. Unknown or contradictory facts are requested as labeled unknowns; model output cannot guarantee factuality beyond the evidence supplied.
+- System instructions remain authoritative. Historical structured messages, explicit fields, and intermediate answers are untrusted evidence; only the current checkpoint request is active.
+- The final checkpoint uses formal sections for task/success criteria, understanding, constraints, decisions and tradeoffs, original and strategic plans, executed steps, exact stopping point, incomplete work, immediate and strategic next actions, blockers/questions, a Conversation Continuity Contract, files to read, files changed, and unknowns.
 
 ## Development checks
 
