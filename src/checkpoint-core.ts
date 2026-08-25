@@ -35,15 +35,6 @@ export interface CheckpointFields {
   notes: string;
 }
 
-export interface CheckpointBranchEntry {
-  id: string;
-  type: string;
-  message?: {
-    role?: unknown;
-    content?: unknown;
-  };
-}
-
 export interface CompletionResponseLike {
   content?: readonly unknown[];
   usage?: UsageLike;
@@ -167,21 +158,21 @@ export function selectCheckpointModel<T extends CheckpointModelLike>(
     }
     const found = find(match[1], match[2]);
     if (!found) {
-      throw new Error(`checkpoint_context model ${value} was not found in the model registry.`);
+      throw new Error(`checkpoint model ${value} was not found in the model registry.`);
     }
     selected = found;
     if (!hasConfiguredAuth(selected)) {
-      throw new Error(`checkpoint_context model ${modelDisplayName(selected)} is missing configured authentication.`);
+      throw new Error(`checkpoint model ${modelDisplayName(selected)} is missing configured authentication.`);
     }
     return selected;
   }
 
   if (!active) {
-    throw new Error("checkpoint_context requires an active model; select an authenticated model first.");
+    throw new Error("checkpoint requires an active model; select an authenticated model first.");
   }
   selected = active;
   if (!hasConfiguredAuth(selected)) {
-    throw new Error(`checkpoint_context model ${modelDisplayName(selected)} is missing configured authentication.`);
+    throw new Error(`checkpoint model ${modelDisplayName(selected)} is missing configured authentication.`);
   }
   return selected;
 }
@@ -211,7 +202,7 @@ export function createCompletionRequest(
   sessionId: string,
   signal?: AbortSignal,
 ): CompletionRequest {
-  if (!sessionId) throw new Error("checkpoint_context requires a fresh nested session id.");
+  if (!sessionId) throw new Error("checkpoint requires a fresh nested session id.");
   return {
     context: { systemPrompt: CHECKPOINT_SYSTEM_PROMPT, messages: [...messages] },
     options: { signal, sessionId, cacheRetention: "none" },
@@ -226,7 +217,7 @@ async function completePass(
   signal: AbortSignal | undefined,
   newSessionId: () => string,
 ): Promise<CheckpointPassResult> {
-  const abortError = () => new Error(`checkpoint_context was aborted during the ${stage} model call.`);
+  const abortError = () => new Error(`checkpoint was aborted during the ${stage} model call.`);
   if (signal?.aborted) throw abortError();
 
   let response: CompletionResponseLike;
@@ -235,19 +226,19 @@ async function completePass(
     response = await complete(model, request.context, request.options);
   } catch (error) {
     if (signal?.aborted) throw abortError();
-    throw new Error(`checkpoint_context ${stage} model call failed: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(`checkpoint ${stage} model call failed: ${error instanceof Error ? error.message : String(error)}`);
   }
   if (signal?.aborted) throw abortError();
   if (!response || typeof response !== "object") {
-    throw new Error(`checkpoint_context ${stage} model call returned no response.`);
+    throw new Error(`checkpoint ${stage} model call returned no response.`);
   }
   if (response.stopReason === "error" || response.stopReason === "aborted") {
     throw new Error(
-      `checkpoint_context ${stage} model call failed: ${response.errorMessage ?? response.stopReason}.`,
+      `checkpoint ${stage} model call failed: ${response.errorMessage ?? response.stopReason}.`,
     );
   }
   const text = extractText(response);
-  if (!text) throw new Error(`checkpoint_context ${stage} model call returned empty output.`);
+  if (!text) throw new Error(`checkpoint ${stage} model call returned empty output.`);
   return { text, usage: response.usage };
 }
 
@@ -285,27 +276,6 @@ export async function runCheckpointPasses(
     newSessionId,
   );
   return { draft, review, final };
-}
-
-export function findFirstKeptEntryId(
-  entries: readonly CheckpointBranchEntry[],
-  toolCallId: string,
-  fallback: string,
-): string {
-  for (const entry of entries) {
-    if (entry.type !== "message" || entry.message?.role !== "assistant") continue;
-    const blocks = Array.isArray(entry.message.content) ? entry.message.content : [];
-    const hasToolCall = blocks.some((block) => {
-      if (!block || typeof block !== "object") return false;
-      const candidate = block as { type?: unknown; id?: unknown; toolCallId?: unknown };
-      return (
-        candidate.type === "toolCall" &&
-        (candidate.id === toolCallId || candidate.toolCallId === toolCallId)
-      );
-    });
-    if (hasToolCall) return entry.id;
-  }
-  return fallback;
 }
 
 const UNTRUSTED_DATA_RULE =

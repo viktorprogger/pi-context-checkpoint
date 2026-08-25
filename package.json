@@ -1,6 +1,6 @@
 {
   "name": "pi-context-checkpoint",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A Pi extension that creates durable, compaction-aware engineering checkpoints.",
   "type": "module",
   "license": "MIT",

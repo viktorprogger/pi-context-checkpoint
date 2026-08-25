@@ -1,16 +1,18 @@
 import {
   buildSessionContext,
+  DEFAULT_COMPACTION_SETTINGS,
   type CompactionResult,
   type ExtensionAPI,
   type ExtensionContext,
   type SessionBeforeCompactEvent,
+  type SessionCompactEvent,
+  type ToolCallEvent,
   type TurnEndEvent,
 } from "@earendil-works/pi-coding-agent";
 import { uuidv7 } from "@earendil-works/pi-agent-core";
 import { Type, type Static } from "typebox";
 
 import {
-  findFirstKeptEntryId,
   runCheckpointPasses,
   selectCheckpointModel,
   prepareCheckpointMessages,
@@ -19,8 +21,9 @@ import {
   type CompletionFunction,
   type Usage,
 } from "../src/checkpoint-core.ts";
+import { appendContextUsageHint } from "../src/context-usage-hint.ts";
 
-const TOOL_NAME = "checkpoint_context";
+const TOOL_NAME = "checkpoint";
 const RECOVERY_COMMAND = "checkpoint_context_recover";
 const CHECKPOINT_DETAILS_VERSION = 1;
 
@@ -55,6 +58,16 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function isTinySessionCompactionError(error: unknown): boolean {
+  return errorMessage(error) === "Nothing to compact (session too small)";
+}
+
+function isCheckpointCompactionDetails(details: unknown, toolCallId: string): boolean {
+  if (!details || typeof details !== "object") return false;
+  const candidate = details as { version?: unknown; toolCallId?: unknown };
+  return candidate.version === CHECKPOINT_DETAILS_VERSION && candidate.toolCallId === toolCallId;
+}
+
 function normalizeFields(params: CheckpointParameters): CheckpointFields {
   return {
     stage: params.stage,
@@ -66,12 +79,32 @@ function normalizeFields(params: CheckpointParameters): CheckpointFields {
   };
 }
 
+function manualCheckpointFields(): CheckpointFields {
+  return {
+    stage: "manual checkpoint",
+    status: "Manual checkpoint requested from the current conversation.",
+    completed: [],
+    incomplete: [],
+    nextActions: ["Continue the original task after checkpoint processing."],
+    notes: "Progress fields were safely defaulted because this checkpoint was requested manually.",
+  };
+}
+
+// Structural subset of Pi's ContextUsage; cast defensively so installations
+// with stale declarations fail softly instead of crashing at load time.
+function readContextUsage(ctx: ExtensionContext): { tokens: number | null; contextWindow: number } | undefined {
+  const getContextUsage = (
+    ctx as unknown as { getContextUsage?: () => { tokens: number | null; contextWindow: number } | undefined }
+  ).getContextUsage;
+  return typeof getContextUsage === "function" ? getContextUsage.call(ctx) : undefined;
+}
+
 function resolveComplete(modelRegistry: ExtensionContext["modelRegistry"]): CompletionFunction {
   // Keep the runtime check at this call boundary for installations with stale declarations or runtimes.
   const complete = (modelRegistry as unknown as { complete?: CompletionFunction }).complete;
   if (typeof complete !== "function") {
     throw new Error(
-      "checkpoint_context requires ctx.modelRegistry.complete; the installed Pi runtime does not expose this API (use a newer Pi runtime).",
+      "checkpoint requires ctx.modelRegistry.complete; the installed Pi runtime does not expose this API (use a newer Pi runtime).",
     );
   }
   return complete.bind(modelRegistry);
@@ -87,6 +120,8 @@ function checkpointResult(state: CheckpointState): {
     content: [{ type: "text", text: state.summary }],
     details: state.details,
     usage: state.usage,
+    // Stop this internal turn so ctx.compact() cannot race a follow-up model call.
+    // The lifecycle below explicitly starts the next turn after compaction completes.
     terminate: true,
   };
 }
@@ -97,9 +132,65 @@ export default function contextCheckpoint(pi: ExtensionAPI): void {
   let pendingRecovery: CheckpointState | undefined;
   let recoveryInFlight = false;
   let generationInFlight = false;
+  let continuationIssuedFor: string | undefined;
+  let checkpointBatchInFlight = false;
+  let compactionStartedFor: string | undefined;
+  let continuationAfterSettled: CheckpointState | undefined;
 
   const notify = (ctx: ExtensionContext, message: string, type: "info" | "warning" | "error" = "info") => {
     if (ctx.hasUI) ctx.ui.notify(message, type);
+  };
+
+  const generateCheckpoint = async (
+    toolCallId: string,
+    fields: CheckpointFields,
+    signal: AbortSignal | undefined,
+    ctx: ExtensionContext,
+  ): Promise<CheckpointState> => {
+    generationInFlight = true;
+    continuationIssuedFor = undefined;
+    try {
+      const model = selectCheckpointModel(
+        ctx.model,
+        process.env.PI_CHECKPOINT_MODEL,
+        (provider, modelId) => ctx.modelRegistry.find(provider, modelId),
+        (candidate) => ctx.modelRegistry.hasConfiguredAuth(candidate),
+      );
+      const complete = resolveComplete(ctx.modelRegistry);
+      const sessionContext = buildSessionContext(ctx.sessionManager.getBranch());
+      const conversation = prepareCheckpointMessages(sessionContext.messages, toolCallId);
+      const passes = await runCheckpointPasses(complete, model, fields, conversation, signal, uuidv7);
+      const combinedUsage = sumUsage([passes.draft.usage, passes.review.usage, passes.final.usage]);
+      return {
+        toolCallId,
+        summary: passes.final.text,
+        fields,
+        usage: combinedUsage,
+        details: {
+          version: CHECKPOINT_DETAILS_VERSION,
+          toolCallId,
+          summary: passes.final.text,
+          fields,
+          usage: combinedUsage,
+        },
+      };
+    } finally {
+      generationInFlight = false;
+    }
+  };
+
+  const requestContinuation = (checkpoint: CheckpointState, deliverAs?: "followUp"): void => {
+    if (continuationIssuedFor === checkpoint.toolCallId) return;
+    continuationIssuedFor = checkpoint.toolCallId;
+    pi.sendMessage(
+      {
+        customType: "checkpoint-continuation",
+        content:
+          "Checkpoint processing is complete. Continue working on the original task from the current state; do not stop merely because the checkpoint finished. Take the next appropriate action.",
+        display: false,
+      },
+      deliverAs ? { triggerTurn: true, deliverAs } : { triggerTurn: true },
+    );
   };
 
   const queueRecovery = (ctx: ExtensionContext, checkpoint: CheckpointState, reason: unknown): void => {
@@ -117,11 +208,51 @@ export default function contextCheckpoint(pi: ExtensionAPI): void {
     notify(ctx, `Checkpoint compaction failed (${errorMessage(reason)}). Run /${RECOVERY_COMMAND} to start a replacement session.`, "warning");
   };
 
+  const handleCompactionError = (ctx: ExtensionContext, checkpoint: CheckpointState, error: unknown): void => {
+    if (isTinySessionCompactionError(error)) {
+      if (compactionInFlight?.toolCallId === checkpoint.toolCallId) {
+        compactionInFlight = undefined;
+        requestContinuation(checkpoint);
+      }
+      return;
+    }
+    queueRecovery(ctx, checkpoint, error);
+  };
+
+  const startCompaction = (ctx: ExtensionContext, checkpoint: CheckpointState): void => {
+    if (
+      compactionStartedFor === checkpoint.toolCallId ||
+      !compactionInFlight ||
+      compactionInFlight.toolCallId !== checkpoint.toolCallId
+    ) {
+      return;
+    }
+    compactionStartedFor = checkpoint.toolCallId;
+
+    try {
+      ctx.compact({
+        onComplete: () => {
+          if (compactionInFlight?.toolCallId === checkpoint.toolCallId) {
+            compactionInFlight = undefined;
+            requestContinuation(checkpoint);
+          }
+        },
+        onError: (error) => handleCompactionError(ctx, checkpoint, error),
+      });
+    } catch (error) {
+      handleCompactionError(ctx, checkpoint, error);
+    }
+  };
+
   pi.registerCommand(RECOVERY_COMMAND, {
-    description: "Recover from a failed checkpoint compaction in a replacement session",
+    description: "ONLY use after a checkpoint compaction error: recover in a replacement session",
     handler: async (_args, ctx) => {
       const pending = pendingRecovery;
-      if (!pending || recoveryInFlight) return;
+      if (!pending) {
+        notify(ctx, "No checkpoint recovery is pending.");
+        return;
+      }
+      if (recoveryInFlight) return;
       if (ctx.signal?.aborted) {
         notify(ctx, "Checkpoint replacement recovery was aborted.", "error");
         return;
@@ -161,22 +292,94 @@ export default function contextCheckpoint(pi: ExtensionAPI): void {
     },
   });
 
+  pi.registerCommand(TOOL_NAME, {
+    description: "Generate, compact, and continue from a checkpoint using the current conversation",
+    handler: async (_args, ctx) => {
+      if (generationInFlight || waitingForTurnEnd || compactionInFlight || pendingRecovery || recoveryInFlight) {
+        notify(ctx, "A checkpoint is already generating or compacting a checkpoint.", "warning");
+        return;
+      }
+      await ctx.waitForIdle();
+      if (generationInFlight || waitingForTurnEnd || compactionInFlight || pendingRecovery || recoveryInFlight) {
+        notify(ctx, "A checkpoint is already generating or compacting a checkpoint.", "warning");
+        return;
+      }
+      if (ctx.signal?.aborted) {
+        notify(ctx, "Manual checkpoint was aborted.", "error");
+        return;
+      }
+
+      const checkpoint = await generateCheckpoint(uuidv7(), manualCheckpointFields(), ctx.signal, ctx);
+      const contextUsage = readContextUsage(ctx);
+      if (contextUsage && contextUsage.tokens !== null && contextUsage.tokens <= DEFAULT_COMPACTION_SETTINGS.keepRecentTokens) {
+        requestContinuation(checkpoint);
+        return;
+      }
+      compactionInFlight = checkpoint;
+      startCompaction(ctx, checkpoint);
+    },
+  });
+
   pi.on("session_start", async (_event, _ctx) => {
     waitingForTurnEnd = undefined;
     compactionInFlight = undefined;
     pendingRecovery = undefined;
     recoveryInFlight = false;
     generationInFlight = false;
+    continuationIssuedFor = undefined;
+    checkpointBatchInFlight = false;
+    compactionStartedFor = undefined;
+    continuationAfterSettled = undefined;
+  });
+
+  pi.on("tool_call", async (event: ToolCallEvent, _ctx) => {
+    if (event.toolName === TOOL_NAME) {
+      checkpointBatchInFlight = true;
+      return;
+    }
+    if (!checkpointBatchInFlight) return;
+    return {
+      block: true,
+      reason: "checkpoint must be the final tool in an assistant batch; wait for compaction before continuing.",
+      terminate: true,
+    };
+  });
+
+  pi.on("session_compact", async (event: SessionCompactEvent, _ctx) => {
+    const checkpoint = compactionInFlight;
+    if (
+      !checkpoint ||
+      !event.fromExtension ||
+      !isCheckpointCompactionDetails(event.compactionEntry.details, checkpoint.toolCallId)
+    ) {
+      return;
+    }
+
+    compactionInFlight = undefined;
+    compactionStartedFor = checkpoint.toolCallId;
+    // Threshold/overflow compaction runs before Pi's agent settles, so queue a
+    // follow-up. Manual compaction has already waited for idle and can trigger directly.
+    requestContinuation(checkpoint, event.reason === "manual" ? undefined : "followUp");
+  });
+
+  pi.on("agent_settled", async (_event, ctx) => {
+    const continuation = continuationAfterSettled;
+    continuationAfterSettled = undefined;
+    if (continuation) requestContinuation(continuation);
+
+    const checkpoint = compactionInFlight;
+    if (checkpoint) startCompaction(ctx, checkpoint);
   });
 
   pi.registerTool({
     name: TOOL_NAME,
-    label: "Checkpoint Context",
+    label: "Checkpoint",
     description:
-      "Create a durable engineering checkpoint from the active conversation and explicit progress fields, then stop this turn so Pi can compact around it.",
+      "Create a durable engineering checkpoint from the active conversation and explicit progress fields, compact it, and then continue working on the task.",
     promptSnippet: "Capture a durable engineering checkpoint before a phase boundary or context compaction",
     promptGuidelines: [
-      "Use checkpoint_context only when a durable phase checkpoint is needed, and provide concrete completed, incomplete, nextActions, and notes fields.",
+      "Use checkpoint only when a durable phase checkpoint is needed, and provide concrete completed, incomplete, nextActions, and notes fields.",
+      "Watch the <ctx-usage> line appended after recent tool results: it reports percent of the autocompact limit used by checkpoint policy. Below 20% checkpointing with checkpoint is premature; 20-50% checkpoint only at a major milestone; 50-70% is the best time for a phase checkpoint; 70-85% wrap up promptly; 85%+ call checkpoint immediately even mid-task.",
     ],
     executionMode: "sequential",
     parameters: CheckpointParameters,
@@ -188,56 +391,18 @@ export default function contextCheckpoint(pi: ExtensionAPI): void {
       ctx: ExtensionContext,
     ) {
       if (generationInFlight || waitingForTurnEnd || compactionInFlight || pendingRecovery || recoveryInFlight) {
-        throw new Error("checkpoint_context is already generating or compacting a checkpoint.");
+        throw new Error("checkpoint is already generating or compacting a checkpoint.");
       }
-      generationInFlight = true;
-      try {
-        const model = selectCheckpointModel(
-          ctx.model,
-          process.env.PI_CHECKPOINT_MODEL,
-          (provider, modelId) => ctx.modelRegistry.find(provider, modelId),
-          (candidate) => ctx.modelRegistry.hasConfiguredAuth(candidate),
-        );
-        const complete = resolveComplete(ctx.modelRegistry);
-        const sessionContext = buildSessionContext(ctx.sessionManager.getBranch());
-        // execute() runs before the assistant tool call/result is persisted. Copy only the
-        // context before that in-flight call; never mutate the read-only active session.
-        const conversation = prepareCheckpointMessages(sessionContext.messages, toolCallId);
-        const fields = normalizeFields(params);
-
-        // runCheckpointPasses makes exactly three explicit, sequential calls: draft, independent review, final synthesis.
-        const passes = await runCheckpointPasses(
-          complete,
-          model,
-          fields,
-          conversation,
-          signal,
-          uuidv7,
-        );
-
-        const combinedUsage = sumUsage([passes.draft.usage, passes.review.usage, passes.final.usage]);
-        const state: CheckpointState = {
-          toolCallId,
-          summary: passes.final.text,
-          fields,
-          usage: combinedUsage,
-          details: {
-            version: CHECKPOINT_DETAILS_VERSION,
-            toolCallId,
-            summary: passes.final.text,
-            fields,
-            usage: combinedUsage,
-          },
-        };
-        waitingForTurnEnd = state;
-        return checkpointResult(state);
-      } finally {
-        generationInFlight = false;
-      }
+      // execute() runs before the assistant tool call/result is persisted. The shared
+      // generator copies only the context before that in-flight call.
+      const state = await generateCheckpoint(toolCallId, normalizeFields(params), signal, ctx);
+      waitingForTurnEnd = state;
+      return checkpointResult(state);
     },
   });
 
   pi.on("turn_end", async (event: TurnEndEvent, ctx) => {
+    checkpointBatchInFlight = false;
     const checkpoint = waitingForTurnEnd;
     if (!checkpoint) return;
     const persisted = event.toolResults.some(
@@ -247,19 +412,34 @@ export default function contextCheckpoint(pi: ExtensionAPI): void {
 
     waitingForTurnEnd = undefined;
     compactionInFlight = checkpoint;
-    try {
-      ctx.compact({
-        onComplete: () => {
-          if (compactionInFlight?.toolCallId === checkpoint.toolCallId) compactionInFlight = undefined;
-        },
-        onError: (error) => queueRecovery(ctx, checkpoint, error),
-      });
-    } catch (error) {
-      queueRecovery(ctx, checkpoint, error);
+
+    // Pi's core reports tiny-session compaction as an error before extension callbacks
+    // run. Avoid that known case when the public usage estimate makes it certain.
+    const contextUsage = readContextUsage(ctx);
+    if (contextUsage && contextUsage.tokens !== null && contextUsage.tokens <= DEFAULT_COMPACTION_SETTINGS.keepRecentTokens) {
+      compactionInFlight = undefined;
+      continuationAfterSettled = checkpoint;
+      return;
     }
+
+    // Wait for agent_settled before calling ctx.compact(). Pi's compact() first
+    // waits for the active run to become idle; starting it here can deadlock or
+    // race queued work after this turn.
   });
 
-  pi.on("session_before_compact", async (event: SessionBeforeCompactEvent, ctx) => {
+  // Inject an ephemeral tail-of-context checkpoint-pressure hint before every LLM
+  // call. The `context` event receives a deep copy that is never persisted, so the
+  // session file keeps no accumulating boilerplate: at any moment the model sees
+  // exactly one fresh `<ctx-usage>` line, placed after the latest tool result for
+  // maximal recency attention and provider cache stability.
+  pi.on("context", async (event, ctx) => {
+    const contextUsage = readContextUsage(ctx);
+    const messages = appendContextUsageHint(event.messages, contextUsage);
+    if (messages === event.messages) return undefined;
+    return { messages };
+  });
+
+  pi.on("session_before_compact", async (event: SessionBeforeCompactEvent, _ctx) => {
     const checkpoint = compactionInFlight;
     if (!checkpoint) return;
     if (event.signal.aborted) {
@@ -267,15 +447,12 @@ export default function contextCheckpoint(pi: ExtensionAPI): void {
       return { cancel: true };
     }
 
-    const branch = ctx.sessionManager.getBranch();
-    const firstKeptEntryId = findFirstKeptEntryId(
-      branch,
-      checkpoint.toolCallId,
-      event.preparation.firstKeptEntryId,
-    );
+    // Preserve Pi's native retained-tail boundary. Overriding it with the checkpoint
+    // tool-call entry made the UI discard every earlier message even when native
+    // /compact would have kept those messages visible.
     const compaction = {
       summary: checkpoint.summary,
-      firstKeptEntryId,
+      firstKeptEntryId: event.preparation.firstKeptEntryId,
       tokensBefore: event.preparation.tokensBefore,
       usage: checkpoint.usage,
       details: checkpoint.details,

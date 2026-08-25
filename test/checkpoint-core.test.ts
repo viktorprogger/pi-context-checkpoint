@@ -9,7 +9,6 @@ import {
   emptyUsage,
   prepareCheckpointMessages,
   extractText,
-  findFirstKeptEntryId,
   runCheckpointPasses,
   selectCheckpointModel,
   sumUsage,
@@ -147,8 +146,8 @@ test("prompts preserve explicit fields and enforce historical-message security",
 test("structured context conversion omits the in-flight call and following messages", () => {
   const messages: any[] = [
     { role: "user", content: "historical", timestamp: 1 },
-    { role: "assistant", content: [{ type: "toolCall", id: "checkpoint-1", name: "checkpoint_context", arguments: {} }], timestamp: 2 },
-    { role: "toolResult", toolCallId: "checkpoint-1", toolName: "checkpoint_context", content: [{ type: "text", text: "not persisted yet" }], isError: false, timestamp: 3 },
+    { role: "assistant", content: [{ type: "toolCall", id: "checkpoint-1", name: "checkpoint", arguments: {} }], timestamp: 2 },
+    { role: "toolResult", toolCallId: "checkpoint-1", toolName: "checkpoint", content: [{ type: "text", text: "not persisted yet" }], isError: false, timestamp: 3 },
   ];
   const converted = prepareCheckpointMessages(messages, "checkpoint-1");
   assert.equal(converted.length, 1);
@@ -240,27 +239,4 @@ test("model selection handles default, override, malformed, missing, and unauthe
     /authentication/,
   );
   assert.throws(() => selectCheckpointModel(undefined, undefined, find, authenticated), /active model/);
-});
-
-test("first kept entry is the earliest matching assistant tool call", () => {
-  const entries = [
-    {
-      id: "assistant-1",
-      type: "message",
-      message: { role: "assistant", content: [{ type: "text", text: "no" }] },
-    },
-    {
-      id: "assistant-2",
-      type: "message",
-      message: { role: "assistant", content: [{ type: "toolCall", id: "checkpoint-1" }] },
-    },
-    {
-      id: "assistant-3",
-      type: "message",
-      message: { role: "assistant", content: [{ type: "toolCall", id: "checkpoint-1" }] },
-    },
-  ];
-
-  assert.equal(findFirstKeptEntryId(entries, "checkpoint-1", "fallback"), "assistant-2");
-  assert.equal(findFirstKeptEntryId(entries, "missing", "fallback"), "fallback");
 });
