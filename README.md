@@ -1,6 +1,8 @@
 # pi-context-checkpoint
 
-`pi-context-checkpoint` adds an LLM-callable `checkpoint` tool for durable engineering phase checkpoints. It passes Pi's active, compaction-aware LLM message sequence directly as structured messages (rather than serializing the conversation), plus explicit progress fields. It runs two sequential chained future-self continuation passes: factual checkpoint extraction, then review/correction combined with final durable checkpoint generation. It then compacts the session and automatically continues the task.
+> **Disclosure:** This project was vibe-coded from start to finish. Review and test it carefully before relying on it in production.
+
+`pi-context-checkpoint` adds an LLM-callable `checkpoint` tool for durable engineering phase checkpoints. It passes Pi's active, compaction-aware LLM message sequence directly as structured messages (rather than serializing the conversation), plus explicit progress fields. Checkpoint generation now uses **two sequential chained LLM passes instead of three**: factual checkpoint extraction, then review/correction combined with final durable checkpoint generation. It then compacts the session and automatically continues the task.
 
 ## Install
 
