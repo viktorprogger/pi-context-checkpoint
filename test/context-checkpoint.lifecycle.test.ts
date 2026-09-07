@@ -115,12 +115,12 @@ async function executeCheckpoint(f: ReturnType<typeof fixture>) {
   return f.tools.get("checkpoint").execute("tool-1", params, undefined, undefined, f.context());
 }
 
-test("registers the manual command and runs exactly three completions after waiting for idle", async () => {
+test("registers the manual command and runs exactly two completions after waiting for idle", async () => {
   const f = fixture();
   assert.equal(f.commands.has("checkpoint"), true);
   await f.commands.get("checkpoint")!("", f.context());
   assert.equal(f.waitForIdleCalls, 1);
-  assert.equal(f.completions.length, 3);
+  assert.equal(f.completions.length, 2);
   assert.equal(f.compactCalls, 1);
 });
 
@@ -128,7 +128,7 @@ test("manual checkpoint skips compaction for a short session and continues", asy
   const f = fixture();
   f.setContextUsage({ tokens: 1 });
   await f.commands.get("checkpoint")!("", f.context());
-  assert.equal(f.completions.length, 3);
+  assert.equal(f.completions.length, 2);
   assert.equal(f.compactCalls, 0);
   assert.equal(f.sentMessages.length, 1);
 });
@@ -147,7 +147,7 @@ test("manual checkpoint command guard avoids a second generation", async () => {
   const first = f.commands.get("checkpoint")!("", f.context());
   const second = f.commands.get("checkpoint")!("", f.context());
   await Promise.all([first, second]);
-  assert.equal(f.completions.length, 3);
+  assert.equal(f.completions.length, 2);
   assert.match(f.notifications[0], /already generating|compacting/);
 });
 
@@ -158,11 +158,11 @@ test("recovery command warns that it is only for checkpoint compaction errors an
   assert.match(f.commandDescriptions.get("checkpoint_context_recover") ?? "", /ONLY/i);
 });
 
-test("registers and executes the tool with three nested completions, then persists custom compaction", async () => {
+test("registers and executes the tool with two nested completions, then persists custom compaction", async () => {
   const f = fixture();
   assert.ok(f.tools.has("checkpoint"));
   const result = await executeCheckpoint(f);
-  assert.equal(f.completions.length, 3);
+  assert.equal(f.completions.length, 2);
   assert.equal(result.terminate, true);
 
   await f.events.get("turn_end")!({
@@ -177,7 +177,7 @@ test("registers and executes the tool with three nested completions, then persis
     preparation: { firstKeptEntryId: "fallback", tokensBefore: 42 },
     signal: new AbortController().signal,
   }, f.context());
-  assert.equal(before.compaction.summary, "pass-3");
+  assert.equal(before.compaction.summary, "pass-2");
   assert.equal(before.compaction.firstKeptEntryId, "fallback");
   assert.equal(before.compaction.tokensBefore, 42);
   assert.equal(before.compaction.details.toolCallId, "tool-1");
@@ -274,8 +274,8 @@ test("compaction error arms one manual recovery and the command seeds a replacem
   await f.commands.get("checkpoint_context_recover")!("", f.context());
   await f.commands.get("checkpoint_context_recover")!("", f.context());
   assert.equal(f.newSessions, 1);
-  assert.equal(f.appended[0].content, "pass-3");
-  assert.equal(f.completions.length, 3);
+  assert.equal(f.appended[0].content, "pass-2");
+  assert.equal(f.completions.length, 2);
 });
 
 test("recovery does not notify through the old context after cancelled replacement", async () => {

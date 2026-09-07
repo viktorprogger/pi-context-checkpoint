@@ -56,11 +56,11 @@ test("percent handles degenerate limits and invalid token values", () => {
   assert.equal(compactionUsagePercent(Number.POSITIVE_INFINITY, WINDOW, RESERVE), 100);
 });
 
-test("bands split at 20/50/70/85 and treat NaN as early", () => {
+test("bands split at 25/50/70/85 and treat NaN as early", () => {
   const cases: Array<[number, ReturnType<typeof usageBand>]> = [
     [0, "early"],
-    [19, "early"],
-    [20, "optional"],
+    [24, "early"],
+    [25, "optional"],
     [49, "optional"],
     [50, "good"],
     [69, "good"],
@@ -76,7 +76,7 @@ test("bands split at 20/50/70/85 and treat NaN as early", () => {
   }
 });
 
-test("hint text stays neutral below 20% and escalates wording above thresholds", () => {
+test("hint text stays neutral below 25% and escalates wording above thresholds", () => {
   const early = contextUsageHint(12);
   assert.match(early, /12% of autocompact limit/);
   assert.doesNotMatch(early, /checkpoint/i);

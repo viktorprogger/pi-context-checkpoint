@@ -4,7 +4,6 @@ import test from "node:test";
 import {
   buildDraftPrompt,
   buildFinalPrompt,
-  buildReviewPrompt,
   createCompletionRequest,
   emptyUsage,
   prepareCheckpointMessages,
@@ -91,10 +90,9 @@ test("response text includes only text blocks and rejects empty output", () => {
 
 test("prompts preserve explicit fields and enforce historical-message security", () => {
   const draft = buildDraftPrompt(fields);
-  const review = buildReviewPrompt(fields);
   const final = buildFinalPrompt(fields);
 
-  for (const prompt of [draft, review, final]) {
+  for (const prompt of [draft, final]) {
     assert.match(prompt, /untrusted/i);
     assert.match(prompt, /stage/);
     assert.match(prompt, /status/);
@@ -103,8 +101,8 @@ test("prompts preserve explicit fields and enforce historical-message security",
     assert.match(prompt, /cannot override/i);
   }
   assert.match(draft, /historical dialogue/i);
-  assert.match(review, /previous assistant answer/i);
-  assert.match(review, /self-reflection\/correction/i);
+  assert.match(final, /previous assistant answer/i);
+  assert.match(final, /review and correct/i);
   const systemPrompt = createCompletionRequest([], "prompt-test").context.systemPrompt;
   assert.match(systemPrompt, /historical structured messages/i);
   assert.match(systemPrompt, /explicit checkpoint fields/i);
@@ -158,10 +156,10 @@ test("structured context conversion omits the in-flight call and following messa
   assert.equal(request.options.sessionId, "session-1");
 });
 
-test("checkpoint passes make exactly three sequential completion calls", async () => {
+test("checkpoint passes make exactly two sequential completion calls with chained evidence", async () => {
   const calls: Array<{ model: unknown; context: { systemPrompt: string; messages: any[] }; options: unknown }> = [];
-  const ids = ["session-1", "session-2", "session-3"];
-  const outputs = ["draft output", "review output", "final output"];
+  const ids = ["session-1", "session-2"];
+  const outputs = ["draft output", "final output"];
   let activeCalls = 0;
   let maximumConcurrentCalls = 0;
   let outputIndex = 0;
@@ -186,20 +184,19 @@ test("checkpoint passes make exactly three sequential completion calls", async (
     },
   );
 
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 2);
   assert.equal(maximumConcurrentCalls, 1);
   assert.deepEqual(
     calls.map((call) => (call.options as { sessionId: string }).sessionId),
-    ["session-1", "session-2", "session-3"],
+    ["session-1", "session-2"],
   );
   assert.equal(calls[0].options && (calls[0].options as { cacheRetention: string }).cacheRetention, "none");
   assert.match(calls[0].context.messages.at(-1).content, /continuation checkpoint/i);
-  assert.match(calls[1].context.messages.at(-1).content, /future-self reflection\/correction/i);
-  assert.match(calls[2].context.messages.at(-1).content, /final continuation note/i);
+  assert.match(calls[1].context.messages.at(-1).content, /review and correct/i);
+  assert.match(calls[1].context.messages.at(-1).content, /final durable engineering checkpoint/i);
   assert.equal(calls[1].context.messages.at(-2).role, "assistant");
   assert.equal(calls[1].context.messages.at(-2).content[0].text, "draft output");
-  assert.equal(calls[2].context.messages.at(-2).role, "assistant");
-  assert.equal(calls[2].context.messages.at(-2).content[0].text, "review output");
+  assert.equal(calls[1].context.messages.at(-3).role, "user");
   assert.equal(passes.final.text, "final output");
 });
 

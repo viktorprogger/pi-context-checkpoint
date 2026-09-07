@@ -17,8 +17,8 @@ export interface ContextUsageLike {
 
 /**
  * Checkpoint-pressure bands as percent of the autocompact limit consumed:
- * - early (<20): too early to checkpoint;
- * - optional (20-49): only at a major milestone boundary;
+ * - early (<25): too early to checkpoint;
+ * - optional (25-49): only at a major milestone boundary;
  * - good (50-69): best time for a phase checkpoint;
  * - tight (70-84): context is running out, wrap up soon;
  * - urgent (85+): checkpoint immediately regardless of task state.
@@ -54,7 +54,7 @@ export function compactionUsagePercent(
 }
 
 export function usageBand(percent: number): UsageHintBand {
-	if (!(percent >= 20)) return "early";
+	if (!(percent >= 25)) return "early";
 	if (percent < 50) return "optional";
 	if (percent < 70) return "good";
 	if (percent < 85) return "tight";

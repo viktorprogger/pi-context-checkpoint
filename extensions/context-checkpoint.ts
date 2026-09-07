@@ -160,7 +160,7 @@ export default function contextCheckpoint(pi: ExtensionAPI): void {
       const sessionContext = buildSessionContext(ctx.sessionManager.getBranch());
       const conversation = prepareCheckpointMessages(sessionContext.messages, toolCallId);
       const passes = await runCheckpointPasses(complete, model, fields, conversation, signal, uuidv7);
-      const combinedUsage = sumUsage([passes.draft.usage, passes.review.usage, passes.final.usage]);
+      const combinedUsage = sumUsage([passes.draft.usage, passes.final.usage]);
       return {
         toolCallId,
         summary: passes.final.text,
@@ -379,7 +379,7 @@ export default function contextCheckpoint(pi: ExtensionAPI): void {
     promptSnippet: "Capture a durable engineering checkpoint before a phase boundary or context compaction",
     promptGuidelines: [
       "Use checkpoint only when a durable phase checkpoint is needed, and provide concrete completed, incomplete, nextActions, and notes fields.",
-      "Watch the <ctx-usage> line appended after recent tool results: it reports percent of the autocompact limit used by checkpoint policy. Below 20% checkpointing with checkpoint is premature; 20-50% checkpoint only at a major milestone; 50-70% is the best time for a phase checkpoint; 70-85% wrap up promptly; 85%+ call checkpoint immediately even mid-task.",
+      "Watch the <ctx-usage> line appended after recent tool results: it reports percent of the autocompact limit used by checkpoint policy, and checkpoint action recommendation. No recommendation means no reason to call the `checkpoint` command.",
     ],
     executionMode: "sequential",
     parameters: CheckpointParameters,
