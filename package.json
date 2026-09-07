@@ -5,7 +5,7 @@
   "type": "module",
   "license": "MIT",
   "keywords": ["pi-package", "pi", "extension", "checkpoint", "compaction"],
-  "files": ["extensions", "src", "README.md", "package.json", "tsconfig.json"],
+  "files": ["extensions", "src", "README.md", "LICENSE", "package.json", "tsconfig.json"],
   "pi": {
     "extensions": ["./extensions/context-checkpoint.ts"]
   },
