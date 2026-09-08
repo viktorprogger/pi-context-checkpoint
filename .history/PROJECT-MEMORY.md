@@ -8,9 +8,10 @@
 - **History:** [2026-09-07 two-pass checkpoint generation](2026-09-07-two-pass-checkpoint-generation.md), [2026-08-20 manual checkpoint command](2026-08-20-manual-checkpoint-command.md), [2026-08-19 checkpoint rename and continuation](2026-08-19-checkpoint-continuation.md), [2026-08-19 small-session no-op](2026-08-19-ignore-small-session-compaction.md), [2026-08-18 structured continuation](2026-08-18-structured-continuation.md), [2026-08-18 hardened recovery](2026-08-18-harden-context-checkpoint.md), [2026-02-17 context checkpoint](2026-02-17-context-checkpoint.md)
 - **Revisit:** Revisit summary-only compaction when Pi exposes an explicit zero-tail API or effective `keepRecentTokens` to extensions; current compaction follows Pi's native retained-tail boundary and uses the default keep-recent budget for its conservative preflight.
 
-## Summary model selection
+## Checkpoint summary model selection and settings
 
-- **Current rule:** The active Pi model generates checkpoints unless `PI_CHECKPOINT_MODEL=provider/model` selects an available authenticated model.
-- **Why:** This works without additional configuration while allowing a cheaper or stronger summarizer.
-- **Authority:** `extensions/context-checkpoint.ts` and its README.
-- **History:** [2026-02-17 context checkpoint](2026-02-17-context-checkpoint.md)
+- **Current rule:** Immediately before checkpoint generation, resolve the model with precedence `PI_CHECKPOINT_MODEL → project → global → active`; only an available authenticated candidate is accepted. Persist overrides under the extension-owned `pi-context-checkpoint.endlessModel` key as `provider/model` in global or trusted-project settings. Global Default removes the global override; project Default removes the project override and therefore inherits global or active behavior. `/endless-settings` exposes the scoped model picker without changing Pi's active or default model.
+- **Why:** Checkpoint summarization can use a separately configured model while preserving Pi's normal model selection and safely retaining unrelated settings fields. Project trust gating prevents untrusted project files from controlling model selection without disabling global fallback.
+- **Authority:** `extensions/context-checkpoint.ts`, `src/endless-settings.ts`, `src/endless-model-selector.ts`, and `README.md`.
+- **History:** [Checkpoint summary model settings](2026-09-07-endless-settings.md), [2026-02-17 context checkpoint](2026-02-17-context-checkpoint.md)
+- **Revisit:** Run a controlled live-provider checkpoint when authenticated network testing is explicitly available and acceptable.

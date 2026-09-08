@@ -1,5 +1,6 @@
 # History
 
+- 2026-09-07 — [Checkpoint summary model settings](2026-09-07-endless-settings.md): Adds trusted global/project model overrides with `PI_CHECKPOINT_MODEL → project → global → active` precedence without changing Pi's active/default model.
 - 2026-09-07 — [Reduce checkpoint generation to two LLM passes](2026-09-07-two-pass-checkpoint-generation.md): Combines review/correction with final checkpoint generation, reducing successful checkpoint completions from three to two while retaining the factual extraction safeguard.
 - 2026-08-25 — [Context usage hints for checkpoint timing](2026-08-25-context-usage-hints.md): Injects an ephemeral tail-of-context `<ctx-usage>` line via the `context` event so the model sees autocompact pressure each turn without session-file boilerplate.
 - 2026-08-20 — [Manual checkpoint command and explicit recovery boundary](2026-08-20-manual-checkpoint-command.md): Adds `/checkpoint` as the shared generation/compaction/continuation path and keeps `/checkpoint_context_recover` for failed checkpoint compaction only.

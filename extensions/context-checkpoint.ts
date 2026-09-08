@@ -11,6 +11,15 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { uuidv7 } from "@earendil-works/pi-agent-core";
 import { Type, type Static } from "typebox";
+import { modelPicker } from "../src/endless-model-selector.ts";
+import {
+  ENDLESS_MODEL_KEY,
+  readEndlessSettings,
+  settingsPaths,
+  writeEndlessSetting,
+  resolveCheckpointModel,
+  type Scope,
+} from "../src/endless-settings.ts";
 
 import {
   runCheckpointPasses,
@@ -150,12 +159,17 @@ export default function contextCheckpoint(pi: ExtensionAPI): void {
     generationInFlight = true;
     continuationIssuedFor = undefined;
     try {
-      const model = selectCheckpointModel(
-        ctx.model,
-        process.env.PI_CHECKPOINT_MODEL,
-        (provider, modelId) => ctx.modelRegistry.find(provider, modelId),
-        (candidate) => ctx.modelRegistry.hasConfiguredAuth(candidate),
-      );
+      const trusted = typeof (ctx as any).isProjectTrusted === "function" ? ctx.isProjectTrusted() : true;
+      const paths = settingsPaths(ctx.cwd || process.cwd());
+      const stored = await readEndlessSettings(paths, trusted);
+      const model = resolveCheckpointModel({
+        env: Object.prototype.hasOwnProperty.call(process.env, "PI_CHECKPOINT_MODEL") ? process.env.PI_CHECKPOINT_MODEL : undefined,
+        project: stored.project,
+        global: stored.global,
+        active: ctx.model,
+        find: (provider, modelId) => ctx.modelRegistry.find(provider, modelId),
+        hasConfiguredAuth: (candidate) => ctx.modelRegistry.hasConfiguredAuth(candidate),
+      });
       const complete = resolveComplete(ctx.modelRegistry);
       const sessionContext = buildSessionContext(ctx.sessionManager.getBranch());
       const conversation = prepareCheckpointMessages(sessionContext.messages, toolCallId);
@@ -288,6 +302,55 @@ export default function contextCheckpoint(pi: ExtensionAPI): void {
         console.error(`Checkpoint replacement session failed: ${errorMessage(error)}`);
       } finally {
         recoveryInFlight = false;
+      }
+    },
+  });
+
+  pi.registerCommand("endless-settings", {
+    description: "Choose the model used for checkpoint summarization",
+    handler: async (_args, ctx) => {
+      if (!ctx.hasUI) { notify(ctx, "/endless-settings requires an interactive UI.", "warning"); return; }
+      try {
+        const scope = await ctx.ui.select("Endless settings scope", ["global", "project"]);
+        if (!scope) return;
+        const selectedScope = scope as Scope;
+        const trusted = typeof (ctx as any).isProjectTrusted === "function" ? ctx.isProjectTrusted() : true;
+        if (selectedScope === "project" && !trusted) { notify(ctx, "Project settings require a trusted project.", "error"); return; }
+        const paths = settingsPaths(ctx.cwd || process.cwd());
+        const allModels = ctx.modelRegistry.getAvailable().filter((m) => ctx.modelRegistry.hasConfiguredAuth(m));
+        const scoped = new Set(ctx.scopedModels.map((item) => `${item.model.provider}/${item.model.id}`));
+        const scopedModels = allModels.filter((m) => scoped.has(`${m.provider}/${m.id}`));
+        if (!allModels.length) { notify(ctx, "No authenticated models are available.", "warning"); return; }
+        const defaultLabel = selectedScope === "project" ? "Default (inherit global setting)" : "Default (current active)";
+        const scopedChoices = scopedModels.length ? scopedModels : allModels;
+        const choice = await new Promise<string | undefined>((resolve, reject) => {
+          let settled = false;
+          const finishOnError = (error: unknown) => {
+            if (settled) return;
+            settled = true;
+            reject(error);
+          };
+          ctx.ui.custom(
+            (tui, _theme, _keybinding, done) =>
+              modelPicker(tui, scopedChoices, allModels, defaultLabel, (value) => {
+                if (settled) return;
+                settled = true;
+                done(value);
+                resolve(value);
+              }),
+            { overlay: true },
+          ).catch(finishOnError);
+        });
+        if (choice === undefined) return;
+        if (choice === "") { await writeEndlessSetting(selectedScope, null, paths, trusted); notify(ctx, `Cleared ${selectedScope} checkpoint model.`); return; }
+        const match = /^([^/]+)\/(.+)$/.exec(choice);
+        if (!match) { notify(ctx, "Invalid model selection.", "error"); return; }
+        const candidate = ctx.modelRegistry.find(match[1], match[2]);
+        if (!candidate || !ctx.modelRegistry.hasConfiguredAuth(candidate)) { notify(ctx, "Selected model is no longer available or authenticated.", "error"); return; }
+        await writeEndlessSetting(selectedScope, choice, paths, trusted);
+        notify(ctx, `Saved ${selectedScope} checkpoint model: ${choice}`);
+      } catch (error) {
+        notify(ctx, `Unable to persist endless settings: ${errorMessage(error)}`, "error");
       }
     },
   });

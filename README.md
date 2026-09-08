@@ -41,13 +41,18 @@ The tool returns the final checkpoint as its result and persists the summary in 
 
 ## Configuration
 
-By default, the tool uses the active `ctx.model`. To use another authenticated registry model, set:
+Checkpoint summarization uses an extension-owned setting and never changes Pi's active or default chat model. Configure it interactively with `/endless-settings`: choose global or trusted-project scope, then choose a model. The picker supports scoped/all model views (Tab), filtering, arrows, Enter, and Escape.
 
-```bash
-export PI_CHECKPOINT_MODEL=provider/model
-```
+The setting key is `pi-context-checkpoint.endlessModel` in `~/.pi/agent/settings.json` (global) or `<project>/.pi/settings.json` (project), with a canonical `provider/model` string. Resolution precedence is:
 
-The override is resolved with `modelRegistry.find(provider, modelId)`. Missing models, missing authentication, missing active models, malformed overrides, and empty model output fail with explicit errors. Each of the two nested requests receives the tool abort signal, a fresh UUIDv7 session ID, and `cacheRetention: "none"`.
+1. `PI_CHECKPOINT_MODEL` when defined (including an empty value, which fails explicitly);
+2. project setting;
+3. global setting;
+4. the active model.
+
+Missing, `null`, and blank persisted values are unset. Configured models must exist in the registry and have configured authentication; invalid values fail explicitly rather than silently falling through. Project settings are read or written only for trusted projects. Files are updated atomically while preserving unrelated keys. Each of the two nested requests receives the tool abort signal, a fresh UUIDv7 session ID, and `cacheRetention: "none"`.
+
+The selector is implemented with public `pi-tui` primitives rather than Pi's internal `/model` component. This keeps the extension API-compatible, with minor visual/catalog differences from `/model`.
 
 ## Recovery after compaction errors
 
