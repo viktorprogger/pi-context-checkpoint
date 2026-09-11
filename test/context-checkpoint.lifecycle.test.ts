@@ -115,6 +115,23 @@ async function executeCheckpoint(f: ReturnType<typeof fixture>) {
   return f.tools.get("checkpoint").execute("tool-1", params, undefined, undefined, f.context());
 }
 
+test("tool guidance makes checkpoint a bridge between substantial phases", () => {
+  const f = fixture();
+  const tool = f.tools.get("checkpoint");
+  const promptSnippet = tool.promptSnippet;
+  assert.match(promptSnippet, /between two substantial phases/i);
+  assert.match(promptSnippet, /after substantial work/i);
+  assert.match(promptSnippet, /another substantial phase remaining/i);
+  assert.match(promptSnippet, /not for a final\/pre-work or immediate pressure-driven call/i);
+  const guidelines = tool.promptGuidelines.join(" ");
+  assert.match(guidelines, /between two substantial parts/i);
+  assert.match(guidelines, /after substantial work has accumulated/i);
+  assert.match(guidelines, /another substantial phase remains/i);
+  assert.match(guidelines, /not a final report/i);
+  assert.match(guidelines, /before substantial work has accumulated/i);
+  assert.match(guidelines, /no recommendation means do not call/i);
+});
+
 test("registers the manual command and runs exactly two completions after waiting for idle", async () => {
   const f = fixture();
   assert.equal(f.commands.has("checkpoint"), true);
@@ -356,7 +373,7 @@ test("context handler injects the ctx-usage hint only when useful", async () => 
   const injected = result.messages[1].content[1];
   assert.deepEqual(injected, {
     type: "text",
-    text: "<ctx-usage>86% of autocompact limit - URGENT: call checkpoint now regardless of task state; do not start new subtasks.</ctx-usage>",
+    text: "<ctx-usage>86% of autocompact limit - URGENT: checkpoint at the next safe boundary between substantial phases if substantial work remains; do not start new subtasks.</ctx-usage>",
   });
   // Inputs stay untouched (pi hands handlers deep copies, but we never mutate anyway).
   assert.equal(messages[1].content.length, 1);

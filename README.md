@@ -22,13 +22,13 @@ The package manifest loads `extensions/context-checkpoint.ts` automatically when
 
 ## Use
 
-Ask the agent to call `checkpoint` at a phase boundary and provide:
+Ask the agent to call `checkpoint` only at the boundary between two substantial parts of ongoing work, after substantial work has accumulated and when another substantial phase remains. It is not a final-report step or a pre-work ritual. Provide:
 
 You can also run `/checkpoint` manually. It waits for Pi to become idle, uses the current conversation, safely defaults the structured progress fields, runs the same two sequential checkpoint completions as the tool, compacts the session when needed, and starts the same hidden continuation. A short session skips compaction and continues directly.
 
 ### Context usage hints
 
-Before every LLM call the extension appends an ephemeral `<ctx-usage>` line after the latest tool result, reporting how much of the auto-compaction limit (`contextWindow - DEFAULT_COMPACTION_SETTINGS.reserveTokens`) is already consumed. The line lives only in the outgoing request context: it is never persisted to the session file, appears exactly once at the very tail (maximal recency attention), refreshes each turn, and disappears on its own after compaction. Its wording carries the checkpoint recommendation: below 25% is neutral, 25-49% means checkpoint only at major milestones, 50-69% is the best time for a phase checkpoint, 70-84% means wrap up promptly, and 85%+ means call checkpoint immediately even mid-task. The extension's system-prompt guideline tells the model to follow that recommendation and not call `checkpoint` when no recommendation is present.
+Before every LLM call the extension appends an ephemeral `<ctx-usage>` line after the latest tool result, reporting how much of the auto-compaction limit (`contextWindow - DEFAULT_COMPACTION_SETTINGS.reserveTokens`) is already consumed. The line lives only in the outgoing request context: it is never persisted to the session file, appears exactly once at the very tail (maximal recency attention), refreshes each turn, and disappears on its own after compaction. Its wording carries the checkpoint recommendation: below 25% is neutral, 25-49% means checkpoint only at a major boundary between substantial phases when another substantial phase remains, 50-69% is the best time to checkpoint between substantial phases, 70-84% means plan a checkpoint at the next safe boundary if substantial work remains ahead, and 85%+ means checkpoint at the next safe boundary if substantial work remains rather than stopping mid-phase. The extension's tool guidance treats this recommendation as subordinate to the between-phases rule and says not to call `checkpoint` when no recommendation is present.
 
 - `stage` — the current project or task stage;
 - `status` — current status and where work stopped;

@@ -439,10 +439,11 @@ export default function contextCheckpoint(pi: ExtensionAPI): void {
     label: "Checkpoint",
     description:
       "Create a durable engineering checkpoint from the active conversation and explicit progress fields, compact it, and then continue working on the task.",
-    promptSnippet: "Capture a durable engineering checkpoint before a phase boundary or context compaction",
+    promptSnippet:
+      "Use only between two substantial phases: after substantial work, with another substantial phase remaining—not for a final/pre-work or immediate pressure-driven call.",
     promptGuidelines: [
-      "Use checkpoint only when a durable phase checkpoint is needed, and provide concrete completed, incomplete, nextActions, and notes fields.",
-      "Watch the <ctx-usage> line appended after recent tool results: it reports percent of the autocompact limit used by checkpoint policy, and checkpoint action recommendation. No recommendation means no reason to call the `checkpoint` command.",
+      "Use checkpoint only at the boundary between two substantial parts of ongoing work: call it after substantial work has accumulated and only when another substantial phase remains. It is not a final report or a pre-work ritual; do not call it before substantial work has accumulated. Provide concrete completed, incomplete, nextActions, and notes fields.",
+      "Watch the <ctx-usage> line appended after recent tool results: it reports percent of the autocompact limit used by checkpoint policy and gives timing guidance. Treat that guidance as subordinate to the between-phases rule above; no recommendation means do not call the checkpoint tool.",
     ],
     executionMode: "sequential",
     parameters: CheckpointParameters,

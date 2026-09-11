@@ -81,17 +81,29 @@ test("hint text stays neutral below 25% and escalates wording above thresholds",
   assert.match(early, /12% of autocompact limit/);
   assert.doesNotMatch(early, /checkpoint/i);
 
-  assert.match(contextUsageHint(30), /30% of autocompact limit - checkpoint only at a major milestone boundary\./);
-  assert.match(contextUsageHint(55), /good time to call checkpoint at a phase boundary\./);
-  assert.match(contextUsageHint(72), /context is getting tight - plan to checkpoint soon\./);
+  assert.match(
+    contextUsageHint(30),
+    /30% of autocompact limit - checkpoint only at a major milestone boundary between substantial phases, with substantial work already completed and another substantial phase still ahead\./,
+  );
+  assert.match(
+    contextUsageHint(55),
+    /good time to call checkpoint between substantial phases, if substantial work is already complete and another substantial phase remains\./,
+  );
+  assert.match(
+    contextUsageHint(72),
+    /context is getting tight - plan to checkpoint at the next safe boundary between substantial phases, if substantial work remains ahead\./,
+  );
   assert.match(
     contextUsageHint(90),
-    /URGENT: call checkpoint now regardless of task state; do not start new subtasks\./,
+    /URGENT: checkpoint at the next safe boundary between substantial phases if substantial work remains; do not start new subtasks\./,
   );
 });
 
 test("hint marker wraps the one-line readout", () => {
-  assert.equal(contextUsageHint(64.4), "64% of autocompact limit - good time to call checkpoint at a phase boundary.");
+  assert.equal(
+    contextUsageHint(64.4),
+    "64% of autocompact limit - good time to call checkpoint between substantial phases, if substantial work is already complete and another substantial phase remains.",
+  );
 });
 
 test("non-finite percent never renders as NaN", () => {
@@ -112,7 +124,7 @@ test("hint is appended to a trailing tool result without mutating inputs", () =>
   assert.equal(lastContent.length, 2);
   assert.deepEqual(lastContent[1], {
     type: "text",
-    text: "<ctx-usage>50% of autocompact limit - good time to call checkpoint at a phase boundary.</ctx-usage>",
+    text: "<ctx-usage>50% of autocompact limit - good time to call checkpoint between substantial phases, if substantial work is already complete and another substantial phase remains.</ctx-usage>",
   });
 
   // Originals stay untouched (the extension relies on fresh deep copies).
@@ -139,5 +151,5 @@ test("injected percent reflects real pressure numbers end to end", () => {
   const tokens = Math.round((WINDOW - DEFAULT_COMPACTION_SETTINGS.reserveTokens) * 0.86);
   const result = appendContextUsageHint([toolResult("done")], { tokens, contextWindow: WINDOW });
   const injected = ((result[0] as any).content as Array<{ type: string; text: string }>)[1].text;
-  assert.match(injected, /^<ctx-usage>86% of autocompact limit - URGENT:/);
+  assert.match(injected, /^<ctx-usage>86% of autocompact limit - URGENT: checkpoint at the next safe boundary between substantial phases if substantial work remains;/);
 });

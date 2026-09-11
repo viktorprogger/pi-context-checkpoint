@@ -21,6 +21,7 @@ Generation, compaction, continuation, and recovery boundaries.
 
 ## Context and checkpoint timing
 
-Context-usage signaling used to guide checkpoint timing.
+Context-usage signaling and amortization guidance used to guide checkpoint timing.
 
+- [Trigger checkpoints between substantial phases](2026-09-11-between-substantial-phases.md)
 - [Context usage hints for checkpoint timing](2026-08-25-context-usage-hints.md)

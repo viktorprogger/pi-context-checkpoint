@@ -8,6 +8,14 @@
 - **History:** [2026-09-07 two-pass checkpoint generation](2026-09-07-two-pass-checkpoint-generation.md), [2026-08-20 manual checkpoint command](2026-08-20-manual-checkpoint-command.md), [2026-08-19 checkpoint rename and continuation](2026-08-19-checkpoint-continuation.md), [2026-08-19 small-session no-op](2026-08-19-ignore-small-session-compaction.md), [2026-08-18 structured continuation](2026-08-18-structured-continuation.md), [2026-08-18 hardened recovery](2026-08-18-harden-context-checkpoint.md), [2026-02-17 context checkpoint](2026-02-17-context-checkpoint.md)
 - **Revisit:** Revisit summary-only compaction when Pi exposes an explicit zero-tail API or effective `keepRecentTokens` to extensions; current compaction follows Pi's native retained-tail boundary and uses the default keep-recent budget for its conservative preflight.
 
+## Checkpoint timing
+
+- **Current rule:** The LLM-facing checkpoint guidance treats `checkpoint` as an amortization boundary between two substantial phases: substantial work must already have accumulated and another substantial phase must remain. It explicitly excludes final-report checkpoints and pre-work checkpoints; context-pressure hints defer urgent calls to the next safe boundary between substantial phases when future substantial work exists.
+- **Why:** Each checkpoint performs two nested LLM passes over the active context, so running it after the last substantial phase or before meaningful context exists can cost more than it saves.
+- **Authority:** `extensions/context-checkpoint.ts`, `src/context-usage-hint.ts`, and `README.md`.
+- **History:** [Trigger checkpoints between substantial phases](2026-09-11-between-substantial-phases.md), [Context usage hints for checkpoint timing](2026-08-25-context-usage-hints.md)
+- **Revisit:** Revisit wording or thresholds after observing provider-backed timing behavior.
+
 ## Checkpoint summary model selection and settings
 
 - **Current rule:** Immediately before checkpoint generation, resolve the model with precedence `PI_CHECKPOINT_MODEL → project → global → active`; only an available authenticated candidate is accepted. Persist overrides under the extension-owned `pi-context-checkpoint.endlessModel` key as `provider/model` in global or trusted-project settings. Global Default removes the global override; project Default removes the project override and therefore inherits global or active behavior. `/endless-settings` exposes the scoped model picker without changing Pi's active or default model.

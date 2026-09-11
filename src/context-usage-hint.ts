@@ -17,20 +17,24 @@ export interface ContextUsageLike {
 
 /**
  * Checkpoint-pressure bands as percent of the autocompact limit consumed:
- * - early (<25): too early to checkpoint;
- * - optional (25-49): only at a major milestone boundary;
- * - good (50-69): best time for a phase checkpoint;
- * - tight (70-84): context is running out, wrap up soon;
- * - urgent (85+): checkpoint immediately regardless of task state.
+ * - early (<25): too early to checkpoint; remain silent.
+ * - optional (25-49): checkpoint only at a major milestone boundary between substantial phases, after substantial work has accumulated and when another substantial phase remains.
+ * - good (50-69): a good time to checkpoint between substantial phases, after substantial work has accumulated and when another substantial phase remains.
+ * - tight (70-84): defer checkpointing until the next safe boundary between substantial phases; checkpoint only after substantial work has accumulated and when another substantial phase remains, without requiring a mid-phase or final-report call.
+ * - urgent (85+): defer checkpointing until the next safe boundary between substantial phases; checkpoint only after substantial work has accumulated and when another substantial phase remains, without requiring a mid-phase or final-report call or starting new subtasks.
  */
 export type UsageHintBand = "early" | "optional" | "good" | "tight" | "urgent";
 
 const BAND_ADVICE: Record<UsageHintBand, string> = {
 	early: "",
-	optional: "checkpoint only at a major milestone boundary.",
-	good: "good time to call checkpoint at a phase boundary.",
-	tight: "context is getting tight - plan to checkpoint soon.",
-	urgent: "URGENT: call checkpoint now regardless of task state; do not start new subtasks.",
+	optional:
+		"checkpoint only at a major milestone boundary between substantial phases, with substantial work already completed and another substantial phase still ahead.",
+	good:
+		"good time to call checkpoint between substantial phases, if substantial work is already complete and another substantial phase remains.",
+	tight:
+		"context is getting tight - plan to checkpoint at the next safe boundary between substantial phases, if substantial work remains ahead.",
+	urgent:
+		"URGENT: checkpoint at the next safe boundary between substantial phases if substantial work remains; do not start new subtasks.",
 };
 
 /**
