@@ -1,5 +1,8 @@
 # History
 
+- 2026-10-14 — [Retry empty checkpoint-model output](2026-10-14-checkpoint-empty-output-retries.md): Retries whitespace-only nested checkpoint output up to three times per pass and preserves a model-visible failure after exhaustion.
+- 2026-10-02 — [Update the checkpoint extension for Pi 1](2026-10-02-pi-1-migration.md): Targets the Pi 1 package family and uses `session_compact_failed` to recover automatic compaction failures without a duplicate fallback compaction.
+- 2026-09-11 — [Gate active work and queue input during checkpoint processing](2026-09-11-queue-input-during-checkpoint.md): Blocks checkpoint beside active Pi tools and batches ordinary incoming input until the checkpoint lifecycle reaches success or failure.
 - 2026-09-11 — [Trigger checkpoints between substantial phases](2026-09-11-between-substantial-phases.md): Changes checkpoint timing guidance so the two-pass cost is amortized between substantial completed and upcoming work, not at the end of a task or before meaningful context exists.
 - 2026-09-07 — [Checkpoint summary model settings](2026-09-07-endless-settings.md): Adds trusted global/project model overrides with `PI_CHECKPOINT_MODEL → project → global → active` precedence without changing Pi's active/default model.
 - 2026-09-07 — [Reduce checkpoint generation to two LLM passes](2026-09-07-two-pass-checkpoint-generation.md): Combines review/correction with final checkpoint generation, reducing successful checkpoint completions from three to two while retaining the factual extraction safeguard.
