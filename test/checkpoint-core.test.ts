@@ -200,13 +200,29 @@ test("checkpoint passes make exactly two sequential completion calls with chaine
   assert.equal(passes.final.text, "final output");
 });
 
-test("empty nested output fails without retrying", async () => {
+test("empty nested output retries and can recover before the retry limit", async () => {
+  let calls = 0;
+  const outputs = ["   ", "draft output", "final output"];
+  const passes = await runCheckpointPasses(
+    async () => ({ content: [{ type: "text", text: outputs[calls++] }] }),
+    { provider: "test", id: "model" },
+    fields,
+    [{ role: "user", content: "evidence", timestamp: 0 }],
+    undefined,
+    () => `session-${calls + 1}`,
+  );
+
+  assert.equal(calls, 3);
+  assert.equal(passes.final.text, "final output");
+});
+
+test("empty nested output fails after three retries and exposes the model-call error", async () => {
   let calls = 0;
   await assert.rejects(
     runCheckpointPasses(
       async () => {
         calls += 1;
-        return { content: [{ type: "text", text: "   " }] };
+        return { content: [{ type: "text", text: calls === 1 ? "draft output" : "   " }] };
       },
       { provider: "test", id: "model" },
       fields,
@@ -214,9 +230,34 @@ test("empty nested output fails without retrying", async () => {
       undefined,
       () => `session-${calls + 1}`,
     ),
-    /continuation checkpoint model call returned empty output/,
+    /final checkpoint model call returned empty output/,
   );
-  assert.equal(calls, 1);
+  assert.equal(calls, 5);
+});
+
+test("malformed checkpoint responses fail without an empty-output retry", async () => {
+  for (const malformed of [
+    { content: [{ type: "text", text: 42 }] },
+    {},
+    { content: null },
+  ]) {
+    let calls = 0;
+    await assert.rejects(
+      runCheckpointPasses(
+        async () => {
+          calls += 1;
+          return malformed as any;
+        },
+        { provider: "test", id: "model" },
+        fields,
+        [{ role: "user", content: "evidence", timestamp: 0 }],
+        undefined,
+        () => `session-${calls + 1}`,
+      ),
+      /malformed response/,
+    );
+    assert.equal(calls, 1);
+  }
 });
 
 test("model selection handles default, override, malformed, missing, and unauthenticated models", () => {

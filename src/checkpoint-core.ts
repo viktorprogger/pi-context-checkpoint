@@ -198,6 +198,21 @@ function generatedAssistant(text: string): AssistantMessage {
   };
 }
 
+function validateCompletionResponse(response: CompletionResponseLike, stage: string): void {
+  if (!Array.isArray(response.content)) {
+    throw new Error(`checkpoint ${stage} model call returned malformed response.`);
+  }
+  for (const block of response.content) {
+    if (!block || typeof block !== "object") {
+      throw new Error(`checkpoint ${stage} model call returned malformed response.`);
+    }
+    const candidate = block as { type?: unknown; text?: unknown };
+    if (candidate.type === "text" && typeof candidate.text !== "string") {
+      throw new Error(`checkpoint ${stage} model call returned malformed response.`);
+    }
+  }
+}
+
 export function createCompletionRequest(
   messages: readonly Message[],
   sessionId: string,
@@ -221,29 +236,35 @@ async function completePass(
   const abortError = () => new Error(`checkpoint was aborted during the ${stage} model call.`);
   if (signal?.aborted) throw abortError();
 
-  let response: CompletionResponseLike;
-  try {
-    const request = createCompletionRequest(messages, newSessionId(), signal);
-    response = await complete(model, request.context, request.options);
-  } catch (error) {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
     if (signal?.aborted) throw abortError();
-    throw new Error(`checkpoint ${stage} model call failed: ${error instanceof Error ? error.message : String(error)}`);
+
+    let response: CompletionResponseLike;
+    try {
+      const request = createCompletionRequest(messages, newSessionId(), signal);
+      response = await complete(model, request.context, request.options);
+    } catch (error) {
+      if (signal?.aborted) throw abortError();
+      throw new Error(`checkpoint ${stage} model call failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (signal?.aborted) throw abortError();
+    if (!response || typeof response !== "object") {
+      throw new Error(`checkpoint ${stage} model call returned no response.`);
+    }
+    if (response.stopReason === "error" || response.stopReason === "aborted") {
+      throw new Error(
+        `checkpoint ${stage} model call failed: ${response.errorMessage ?? response.stopReason}.`,
+      );
+    }
+    validateCompletionResponse(response, stage);
+    const text = extractText(response);
+    if (text) return { text, usage: response.usage };
   }
-  if (signal?.aborted) throw abortError();
-  if (!response || typeof response !== "object") {
-    throw new Error(`checkpoint ${stage} model call returned no response.`);
-  }
-  if (response.stopReason === "error" || response.stopReason === "aborted") {
-    throw new Error(
-      `checkpoint ${stage} model call failed: ${response.errorMessage ?? response.stopReason}.`,
-    );
-  }
-  const text = extractText(response);
-  if (!text) throw new Error(`checkpoint ${stage} model call returned empty output.`);
-  return { text, usage: response.usage };
+
+  throw new Error(`checkpoint ${stage} model call returned empty output.`);
 }
 
-/** Run two sequential future-self continuation passes with no retries or parallel calls. */
+/** Run two sequential future-self continuation passes with empty-output retries and no parallel calls. */
 export async function runCheckpointPasses(
   complete: CompletionFunction,
   model: unknown,
