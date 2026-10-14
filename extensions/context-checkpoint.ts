@@ -6,10 +6,12 @@ import {
   type ExtensionContext,
   type SessionBeforeCompactEvent,
   type SessionCompactEvent,
+  type SessionCompactFailedEvent,
   type ToolCallEvent,
   type TurnEndEvent,
+  type InputEvent,
 } from "@earendil-works/pi-coding-agent";
-import { uuidv7 } from "@earendil-works/pi-agent-core";
+import { uuidv7 } from "@earendil-works/pi-ai";
 import { Type, type Static } from "typebox";
 import { modelPicker } from "../src/endless-model-selector.ts";
 import {
@@ -144,7 +146,28 @@ export default function contextCheckpoint(pi: ExtensionAPI): void {
   let continuationIssuedFor: string | undefined;
   let checkpointBatchInFlight = false;
   let compactionStartedFor: string | undefined;
+  let compactionAbortedFor: string | undefined;
+  // Automatic compaction has no extension completion callback.  Keep its
+  // lifecycle pending until agent_settled, which is after Pi has released its
+  // public compaction lock (and processed any queued continuation).
+  let automaticCompactionFor: string | undefined;
+  let automaticCompactionOutcome: "success" | "aborted" | "failed" | undefined;
   let continuationAfterSettled: CheckpointState | undefined;
+  const activeToolExecutions = new Set<string>();
+  let checkpointLifecycleActive = false;
+  let queuedInputs: Array<{ text: string; images?: InputEvent["images"] }> = [];
+
+  const finishCheckpointLifecycle = (): void => {
+    if (!queuedInputs.length) { checkpointLifecycleActive = false; return; }
+    const content: any[] = [];
+    for (const input of queuedInputs) {
+      content.push({ type: "text", text: input.text });
+      if (input.images) content.push(...input.images);
+    }
+    queuedInputs = [];
+    checkpointLifecycleActive = false;
+    if (content.length) void Promise.resolve(pi.sendUserMessage(content, { deliverAs: "followUp" }));
+  };
 
   const notify = (ctx: ExtensionContext, message: string, type: "info" | "warning" | "error" = "info") => {
     if (ctx.hasUI) ctx.ui.notify(message, type);
@@ -188,6 +211,9 @@ export default function contextCheckpoint(pi: ExtensionAPI): void {
           usage: combinedUsage,
         },
       };
+    } catch (error) {
+      finishCheckpointLifecycle();
+      throw error;
     } finally {
       generationInFlight = false;
     }
@@ -207,26 +233,55 @@ export default function contextCheckpoint(pi: ExtensionAPI): void {
     );
   };
 
-  const queueRecovery = (ctx: ExtensionContext, checkpoint: CheckpointState, reason: unknown): void => {
-    if (
-      pendingRecovery ||
-      !compactionInFlight ||
-      compactionInFlight.toolCallId !== checkpoint.toolCallId ||
-      ctx.signal?.aborted
-    ) {
+  const queueRecovery = (
+    ctx: ExtensionContext,
+    checkpoint: CheckpointState,
+    reason: unknown,
+    deferRelease = false,
+  ): void => {
+    if (pendingRecovery || !compactionInFlight || compactionInFlight.toolCallId !== checkpoint.toolCallId) return;
+
+    // An aborted context cannot be recovered in a replacement session.  It is
+    // still a terminal lifecycle outcome, so do not strand input behind it.
+    if (ctx.signal?.aborted) {
+      compactionInFlight = undefined;
+      finishCheckpointLifecycle();
       return;
     }
 
-    compactionInFlight = undefined;
+    // Automatic compaction failure is reported while Pi still owns its
+    // compaction lifecycle. Keep the checkpoint marked in-flight until
+    // agent_settled releases the public lock and queued input.
+    if (!deferRelease) compactionInFlight = undefined;
     pendingRecovery = checkpoint;
     notify(ctx, `Checkpoint compaction failed (${errorMessage(reason)}). Run /${RECOVERY_COMMAND} to start a replacement session.`, "warning");
+    if (!deferRelease) finishCheckpointLifecycle();
   };
 
+  const isCompactionCancellationError = (error: unknown): boolean =>
+    errorMessage(error) === "Compaction cancelled" || (error instanceof Error && error.name === "AbortError");
+
   const handleCompactionError = (ctx: ExtensionContext, checkpoint: CheckpointState, error: unknown): void => {
+    if (isCompactionCancellationError(error) || compactionAbortedFor === checkpoint.toolCallId) {
+      if (compactionInFlight?.toolCallId === checkpoint.toolCallId) {
+        compactionInFlight = undefined;
+        compactionAbortedFor = undefined;
+        finishCheckpointLifecycle();
+      }
+      return;
+    }
+    if (ctx.signal?.aborted) {
+      if (compactionInFlight?.toolCallId === checkpoint.toolCallId) {
+        compactionInFlight = undefined;
+        finishCheckpointLifecycle();
+      }
+      return;
+    }
     if (isTinySessionCompactionError(error)) {
       if (compactionInFlight?.toolCallId === checkpoint.toolCallId) {
         compactionInFlight = undefined;
         requestContinuation(checkpoint);
+        finishCheckpointLifecycle();
       }
       return;
     }
@@ -248,7 +303,13 @@ export default function contextCheckpoint(pi: ExtensionAPI): void {
         onComplete: () => {
           if (compactionInFlight?.toolCallId === checkpoint.toolCallId) {
             compactionInFlight = undefined;
+            if (compactionAbortedFor === checkpoint.toolCallId) {
+              compactionAbortedFor = undefined;
+              finishCheckpointLifecycle();
+              return;
+            }
             requestContinuation(checkpoint);
+            finishCheckpointLifecycle();
           }
         },
         onError: (error) => handleCompactionError(ctx, checkpoint, error),
@@ -372,10 +433,12 @@ export default function contextCheckpoint(pi: ExtensionAPI): void {
         return;
       }
 
+      checkpointLifecycleActive = true;
       const checkpoint = await generateCheckpoint(uuidv7(), manualCheckpointFields(), ctx.signal, ctx);
       const contextUsage = readContextUsage(ctx);
       if (contextUsage && contextUsage.tokens !== null && contextUsage.tokens <= DEFAULT_COMPACTION_SETTINGS.keepRecentTokens) {
         requestContinuation(checkpoint);
+        finishCheckpointLifecycle();
         return;
       }
       compactionInFlight = checkpoint;
@@ -383,7 +446,19 @@ export default function contextCheckpoint(pi: ExtensionAPI): void {
     },
   });
 
+  pi.on("session_shutdown", async (_event, _ctx) => {
+    // Replacement tears down the old extension instance before the new one
+    // receives session_start. Release Pi-delivered input at this terminal
+    // boundary, while this instance still owns the queue. The release path is
+    // idempotent, so a later/duplicate lifecycle notification is harmless.
+    finishCheckpointLifecycle();
+  });
+
   pi.on("session_start", async (_event, _ctx) => {
+    // A session switch can arrive before the checkpoint reaches its normal
+    // terminal callback. Release Pi-delivered input before resetting the
+    // lifecycle, otherwise clearing the queue silently loses it.
+    finishCheckpointLifecycle();
     waitingForTurnEnd = undefined;
     compactionInFlight = undefined;
     pendingRecovery = undefined;
@@ -392,10 +467,31 @@ export default function contextCheckpoint(pi: ExtensionAPI): void {
     continuationIssuedFor = undefined;
     checkpointBatchInFlight = false;
     compactionStartedFor = undefined;
+    compactionAbortedFor = undefined;
+    automaticCompactionFor = undefined;
+    automaticCompactionOutcome = undefined;
     continuationAfterSettled = undefined;
+    activeToolExecutions.clear();
+  });
+
+  pi.on("tool_execution_start", async (event) => {
+    activeToolExecutions.add(event.toolCallId);
+  });
+
+  pi.on("tool_execution_end", async (event) => {
+    activeToolExecutions.delete(event.toolCallId);
+  });
+
+  pi.on("input", async (event: InputEvent) => {
+    if (!checkpointLifecycleActive || (event.source !== "interactive" && event.source !== "rpc")) return;
+    queuedInputs.push({ text: event.text, images: event.images });
+    return { action: "handled" };
   });
 
   pi.on("tool_call", async (event: ToolCallEvent, _ctx) => {
+    if (event.toolName === TOOL_NAME && [...activeToolExecutions].some((id) => id !== event.toolCallId)) {
+      return { block: true, reason: "checkpoint must wait until other Pi tools finish executing; retry it after the active tools complete." };
+    }
     if (event.toolName === TOOL_NAME) {
       checkpointBatchInFlight = true;
       return;
@@ -418,19 +514,71 @@ export default function contextCheckpoint(pi: ExtensionAPI): void {
       return;
     }
 
-    compactionInFlight = undefined;
     compactionStartedFor = checkpoint.toolCallId;
-    // Threshold/overflow compaction runs before Pi's agent settles, so queue a
-    // follow-up. Manual compaction has already waited for idle and can trigger directly.
-    requestContinuation(checkpoint, event.reason === "manual" ? undefined : "followUp");
+    // Manual ctx.compact() emits this event while Pi still holds its
+    // compaction lock.  Leave the lifecycle (and queued input) active until
+    // ctx.compact()'s onComplete callback, which runs after that lock clears.
+    if (event.reason === "manual") return;
+
+    // Threshold/overflow compaction runs before the agent settles, so queue a
+    // follow-up. Keep the lifecycle active until agent_settled: session_compact
+    // is still inside Pi's public compaction lock.
+    automaticCompactionFor = checkpoint.toolCallId;
+    automaticCompactionOutcome = "success";
+    requestContinuation(checkpoint, "followUp");
+  });
+
+  pi.on("session_compact_failed", async (event: SessionCompactFailedEvent, ctx) => {
+    const checkpoint = compactionInFlight;
+    if (
+      !checkpoint ||
+      !automaticCompactionFor ||
+      automaticCompactionFor !== checkpoint.toolCallId ||
+      compactionStartedFor === checkpoint.toolCallId ||
+      !event.fromExtension
+    ) {
+      return;
+    }
+
+    if (event.aborted) {
+      automaticCompactionOutcome = "aborted";
+      return;
+    }
+
+    automaticCompactionOutcome = "failed";
+    queueRecovery(
+      ctx,
+      checkpoint,
+      new Error(event.errorMessage ?? "automatic compaction failed"),
+      true,
+    );
   });
 
   pi.on("agent_settled", async (_event, ctx) => {
     const continuation = continuationAfterSettled;
     continuationAfterSettled = undefined;
-    if (continuation) requestContinuation(continuation);
+    if (continuation) {
+      requestContinuation(continuation);
+      finishCheckpointLifecycle();
+    }
 
     const checkpoint = compactionInFlight;
+    if (checkpoint && automaticCompactionFor === checkpoint.toolCallId) {
+      // This covers successful automatic compaction, cancellation or failure
+      // reported by the Pi 1 session_compact_failed event, and an automatic
+      // attempt that produced no session_compact event. In all cases this is
+      // the terminal point for the automatic attempt; never start a second
+      // manual compaction.
+      compactionInFlight = undefined;
+      automaticCompactionFor = undefined;
+      automaticCompactionOutcome = undefined;
+      finishCheckpointLifecycle();
+      return;
+    }
+    // No automatic-compaction marker means Pi did not expose an automatic hook
+    // for this checkpoint. The normal path is to apply the checkpoint through
+    // the intended manual-compaction fallback; Pi's public extension API cannot
+    // distinguish that case from an automatic failure before its first hook.
     if (checkpoint) startCompaction(ctx, checkpoint);
   });
 
@@ -459,6 +607,7 @@ export default function contextCheckpoint(pi: ExtensionAPI): void {
       }
       // execute() runs before the assistant tool call/result is persisted. The shared
       // generator copies only the context before that in-flight call.
+      checkpointLifecycleActive = true;
       const state = await generateCheckpoint(toolCallId, normalizeFields(params), signal, ctx);
       waitingForTurnEnd = state;
       return checkpointResult(state);
@@ -507,8 +656,25 @@ export default function contextCheckpoint(pi: ExtensionAPI): void {
     const checkpoint = compactionInFlight;
     if (!checkpoint) return;
     if (event.signal.aborted) {
-      compactionInFlight = undefined;
+      // An automatic attempt has no ctx.compact() callback (and therefore no
+      // cancellation error callback).  Mark it here and finalize at
+      // agent_settled, after Pi releases the public compaction lock.
+      if (compactionStartedFor !== checkpoint.toolCallId) {
+        automaticCompactionFor = checkpoint.toolCallId;
+        automaticCompactionOutcome = "aborted";
+      } else {
+        // Manual ctx.compact() still reports cancellation through onError.
+        compactionAbortedFor = checkpoint.toolCallId;
+      }
       return { cancel: true };
+    }
+
+    // Seeing this hook without a preceding ctx.compact() call identifies an
+    // automatic attempt.  If it later fails before emitting session_compact,
+    // agent_settled will close it without launching a duplicate manual one.
+    if (compactionStartedFor !== checkpoint.toolCallId) {
+      automaticCompactionFor = checkpoint.toolCallId;
+      automaticCompactionOutcome = undefined;
     }
 
     // Preserve Pi's native retained-tail boundary. Overriding it with the checkpoint

@@ -12,12 +12,15 @@ function fixture() {
   const tools = new Map<string, any>();
   const notifications: string[] = [];
   const sentMessages: any[] = [];
+  const sentUserMessages: any[] = [];
   const completions: any[] = [];
   let waitForIdleCalls = 0;
   const appended: any[] = [];
   let compactOptions: any;
   let compactCalls = 0;
   let contextUsage: { tokens: number | null } | undefined;
+  let completionError: Error | undefined;
+  let contextAborted = false;
   let newSessions = 0;
   let sessionFile = "parent.jsonl";
 
@@ -35,18 +38,26 @@ function fixture() {
     sendMessage(message: any, options: any) {
       sentMessages.push({ message, options });
     },
+    sendUserMessage(content: any, options?: any) {
+      sentUserMessages.push({ content, options });
+    },
   };
   contextCheckpoint(api);
 
   const context = (hasUI = true): any => ({
     hasUI,
-    signal: new AbortController().signal,
+    signal: (() => {
+      const controller = new AbortController();
+      if (contextAborted) controller.abort();
+      return controller.signal;
+    })(),
     model: { provider: "test", id: "model" },
     modelRegistry: {
       find: () => undefined,
       hasConfiguredAuth: () => true,
       complete: async (...args: any[]) => {
         completions.push(args);
+        if (completionError) throw completionError;
         return { content: [{ type: "text", text: `pass-${completions.length}` }] };
       },
     },
@@ -81,6 +92,7 @@ function fixture() {
     tools,
     notifications,
     sentMessages,
+    sentUserMessages,
     completions,
     appended,
     get compactOptions() {
@@ -91,6 +103,12 @@ function fixture() {
     },
     setContextUsage(usage: { tokens: number | null } | undefined) {
       contextUsage = usage;
+    },
+    failGeneration(error = new Error("generation failed")) {
+      completionError = error;
+    },
+    abortContext() {
+      contextAborted = true;
     },
     get newSessions() {
       return newSessions;
@@ -150,6 +168,17 @@ test("manual checkpoint skips compaction for a short session and continues", asy
   assert.equal(f.sentMessages.length, 1);
 });
 
+test("generation failure releases queued input", async () => {
+  const f = fixture();
+  f.failGeneration();
+  const command = f.commands.get("checkpoint")!("", f.context());
+  await Promise.resolve();
+  await f.events.get("input")!({ type: "input", text: "queued", source: "interactive" });
+  await assert.rejects(command, /generation failed/);
+  assert.equal(f.sentUserMessages.length, 1);
+  assert.equal(f.sentUserMessages[0].content[0].text, "queued");
+});
+
 test("manual checkpoint compaction completion requests one continuation", async () => {
   const f = fixture();
   await f.commands.get("checkpoint")!("", f.context());
@@ -157,6 +186,61 @@ test("manual checkpoint compaction completion requests one continuation", async 
   f.compactOptions.onComplete({ summary: "runtime summary" });
   f.compactOptions.onComplete({ summary: "duplicate" });
   assert.equal(f.sentMessages.length, 1);
+});
+
+test("manual compaction keeps queued input locked until public completion and releases once", async () => {
+  const f = fixture();
+  await executeCheckpoint(f);
+  await f.events.get("turn_end")!({ toolResults: [{ toolName: "checkpoint", toolCallId: "tool-1" }] }, f.context());
+  await f.events.get("agent_settled")!({}, f.context());
+  await f.events.get("input")!({ type: "input", text: "queued", source: "interactive" });
+  await f.events.get("session_compact")!({
+    fromExtension: true,
+    reason: "manual",
+    compactionEntry: { details: { version: 1, toolCallId: "tool-1" } },
+  }, f.context());
+  assert.equal(f.sentUserMessages.length, 0);
+  f.compactOptions.onComplete({});
+  f.compactOptions.onComplete({});
+  assert.equal(f.sentUserMessages.length, 1);
+});
+
+test("aborted before-compaction keeps input locked until the public cancellation callback", async () => {
+  const f = fixture();
+  await executeCheckpoint(f);
+  await f.events.get("turn_end")!({ toolResults: [{ toolName: "checkpoint", toolCallId: "tool-1" }] }, f.context());
+  await f.events.get("agent_settled")!({}, f.context());
+  await f.events.get("input")!({ type: "input", text: "queued", source: "interactive" });
+
+  const controller = new AbortController();
+  controller.abort();
+  const result = await f.events.get("session_before_compact")!({
+    preparation: { firstKeptEntryId: "entry", tokensBefore: 42 },
+    signal: controller.signal,
+  }, f.context());
+  assert.deepEqual(result, { cancel: true });
+  assert.equal(f.sentUserMessages.length, 0);
+  assert.equal(f.notifications.length, 0);
+
+  f.compactOptions.onError(new Error("Compaction cancelled"));
+  f.compactOptions.onError(new Error("Compaction cancelled"));
+  assert.equal(f.sentUserMessages.length, 1);
+  assert.equal(f.notifications.length, 0);
+});
+
+test("public compaction cancellation releases input once without arming recovery", async () => {
+  const f = fixture();
+  await executeCheckpoint(f);
+  await f.events.get("turn_end")!({ toolResults: [{ toolName: "checkpoint", toolCallId: "tool-1" }] }, f.context());
+  await f.events.get("agent_settled")!({}, f.context());
+  await f.events.get("input")!({ type: "input", text: "queued", source: "interactive" });
+
+  f.compactOptions.onError(new Error("Compaction cancelled"));
+  f.compactOptions.onError(new Error("Compaction cancelled"));
+  assert.equal(f.sentUserMessages.length, 1);
+  assert.equal(f.notifications.length, 0);
+  await f.commands.get("checkpoint_context_recover")!("", f.context());
+  assert.match(f.notifications[0], /No checkpoint recovery is pending/);
 });
 
 test("manual checkpoint command guard avoids a second generation", async () => {
@@ -226,7 +310,65 @@ test("automatic compaction completion also resumes the agent without duplication
   assert.equal(f.sentMessages[0].options.triggerTurn, true);
   assert.equal(f.sentMessages[0].options.deliverAs, "followUp");
   assert.equal(f.compactOptions, undefined);
-  assert.equal(f.sentMessages.length, 1);
+  // session_compact is still inside Pi's public compaction lock.
+  await f.events.get("input")!({ type: "input", text: "queued", source: "interactive" });
+  assert.equal(f.sentUserMessages.length, 0);
+  await f.events.get("agent_settled")!({}, f.context());
+  assert.equal(f.sentUserMessages.length, 1);
+  await f.events.get("agent_settled")!({}, f.context());
+  assert.equal(f.sentUserMessages.length, 1);
+});
+
+test("automatic cancellation at before_compact releases only at agent_settled", async () => {
+  const f = fixture();
+  await executeCheckpoint(f);
+  await f.events.get("turn_end")!({ toolResults: [{ toolName: "checkpoint", toolCallId: "tool-1" }] }, f.context());
+  await f.events.get("input")!({ type: "input", text: "queued", source: "rpc" });
+
+  const controller = new AbortController();
+  controller.abort();
+  const result = await f.events.get("session_before_compact")!({
+    preparation: { firstKeptEntryId: "entry", tokensBefore: 42 },
+    signal: controller.signal,
+  }, f.context());
+  assert.deepEqual(result, { cancel: true });
+  assert.equal(f.sentUserMessages.length, 0);
+
+  // Automatic cancellation emits no session_compact and must not start the
+  // hidden manual fallback when the agent settles.
+  await f.events.get("agent_settled")!({}, f.context());
+  assert.equal(f.compactCalls, 0);
+  assert.equal(f.sentUserMessages.length, 1);
+  await f.events.get("agent_settled")!({}, f.context());
+  assert.equal(f.sentUserMessages.length, 1);
+});
+
+test("automatic compaction failure retains recovery until the agent settles", async () => {
+  const f = fixture();
+  await executeCheckpoint(f);
+  await f.events.get("turn_end")!({ toolResults: [{ toolName: "checkpoint", toolCallId: "tool-1" }] }, f.context());
+  await f.events.get("input")!({ type: "input", text: "queued", source: "rpc" });
+
+  await f.events.get("session_before_compact")!({
+    preparation: { firstKeptEntryId: "entry", tokensBefore: 42 },
+    signal: new AbortController().signal,
+  }, f.context());
+
+  await f.events.get("session_compact_failed")!({
+    reason: "threshold",
+    errorMessage: "Auto-compaction failed: provider failure",
+    aborted: false,
+    willRetry: false,
+    fromExtension: true,
+  }, f.context());
+  assert.equal(f.sentUserMessages.length, 0);
+  assert.match(f.notifications[0], /checkpoint_context_recover/);
+
+  await f.events.get("agent_settled")!({}, f.context());
+  assert.equal(f.sentUserMessages.length, 1);
+  assert.equal(f.compactCalls, 0);
+  await f.commands.get("checkpoint_context_recover")!("", f.context());
+  assert.equal(f.newSessions, 1);
 });
 
 test("blocks later tool calls in the same assistant batch", async () => {
@@ -273,6 +415,31 @@ test("tiny-session compaction callback is a successful no-op for races and older
   assert.equal(f.sentMessages.length, 1);
   assert.equal(f.sentMessages[0].options.deliverAs, undefined);
   await assert.doesNotReject(() => executeCheckpoint(f));
+});
+
+test("compaction failure releases queued input exactly once", async () => {
+  const f = fixture();
+  await executeCheckpoint(f);
+  await f.events.get("turn_end")!({ toolResults: [{ toolName: "checkpoint", toolCallId: "tool-1" }] }, f.context());
+  await f.events.get("agent_settled")!({}, f.context());
+  await f.events.get("input")!({ type: "input", text: "queued", source: "rpc" });
+  f.compactOptions.onError(new Error("failure"));
+  f.compactOptions.onError(new Error("duplicate"));
+  assert.equal(f.sentUserMessages.length, 1);
+  assert.equal(f.sentUserMessages[0].content[0].text, "queued");
+});
+
+test("aborted compaction releases queued input without arming recovery", async () => {
+  const f = fixture();
+  await executeCheckpoint(f);
+  await f.events.get("turn_end")!({ toolResults: [{ toolName: "checkpoint", toolCallId: "tool-1" }] }, f.context());
+  await f.events.get("agent_settled")!({}, f.context());
+  await f.events.get("input")!({ type: "input", text: "queued", source: "rpc" });
+  f.abortContext();
+  f.compactOptions.onError(new Error("failure"));
+  assert.equal(f.sentUserMessages.length, 1);
+  await f.commands.get("checkpoint_context_recover")!("", f.context());
+  assert.match(f.notifications.at(-1) ?? "", /recovery was aborted/);
 });
 
 test("compaction error arms one manual recovery and the command seeds a replacement session", async () => {
@@ -332,6 +499,44 @@ test("recovery does not notify through the old context after cancelled replaceme
   assert.match(errors[0], /cancelled/);
 });
 
+test("session_shutdown releases queued input before an old instance is replaced", async () => {
+  const oldInstance = fixture();
+  await executeCheckpoint(oldInstance);
+  await oldInstance.events.get("input")!({ type: "input", text: "queued", source: "interactive" });
+
+  // A replacement creates a distinct extension instance. Its session_start
+  // cannot observe the old instance's queue; Pi must notify the old instance
+  // first so it can release input before teardown.
+  await oldInstance.events.get("session_shutdown")!({}, oldInstance.context());
+  const newInstance = fixture();
+  await newInstance.events.get("session_start")!({}, newInstance.context());
+
+  assert.deepEqual(oldInstance.sentUserMessages, [{
+    content: [{ type: "text", text: "queued" }],
+    options: { deliverAs: "followUp" },
+  }]);
+  assert.equal(newInstance.sentUserMessages.length, 0);
+
+  // Both terminal notifications must remain safe and must not duplicate it.
+  await oldInstance.events.get("session_shutdown")!({}, oldInstance.context());
+  assert.equal(oldInstance.sentUserMessages.length, 1);
+});
+
+test("session_start releases queued checkpoint input exactly once", async () => {
+  const f = fixture();
+  await executeCheckpoint(f);
+  await f.events.get("input")!({ type: "input", text: "queued", source: "interactive" });
+
+  await f.events.get("session_start")!({}, f.context());
+  await f.events.get("session_start")!({}, f.context());
+
+  assert.equal(f.sentUserMessages.length, 1);
+  assert.deepEqual(f.sentUserMessages[0], {
+    content: [{ type: "text", text: "queued" }],
+    options: { deliverAs: "followUp" },
+  });
+});
+
 test("session_start clears stale pending recovery", async () => {
   const f = fixture();
   await executeCheckpoint(f);
@@ -343,6 +548,29 @@ test("session_start clears stale pending recovery", async () => {
   await f.events.get("session_start")!({}, f.context());
   await f.commands.get("checkpoint_context_recover")!("", f.context());
   assert.equal(f.newSessions, 0);
+});
+
+test("checkpoint waits for active sibling tools and retries after they end", async () => {
+  const f = fixture();
+  await f.events.get("tool_execution_start")!({ toolCallId: "sibling", toolName: "bash" });
+  const blocked = await f.events.get("tool_call")!({ toolName: "checkpoint", toolCallId: "checkpoint-1" }, f.context());
+  assert.equal(blocked.block, true);
+  await f.events.get("tool_execution_end")!({ toolCallId: "sibling", toolName: "bash" });
+  assert.equal(await f.events.get("tool_call")!({ toolName: "checkpoint", toolCallId: "checkpoint-1" }, f.context()), undefined);
+});
+
+test("queues ordinary text and images as one user batch until checkpoint success", async () => {
+  const f = fixture();
+  await executeCheckpoint(f);
+  const image = { type: "image", data: "abc", mimeType: "image/png" };
+  assert.deepEqual(await f.events.get("input")!({ type: "input", text: "first", source: "interactive", images: [image] }), { action: "handled" });
+  assert.deepEqual(await f.events.get("input")!({ type: "input", text: "second", source: "rpc" }), { action: "handled" });
+  assert.equal(await f.events.get("input")!({ type: "input", text: "service", source: "extension" }), undefined);
+  await f.events.get("turn_end")!({ toolResults: [{ toolName: "checkpoint", toolCallId: "tool-1" }] }, f.context());
+  await f.events.get("agent_settled")!({}, f.context());
+  f.compactOptions.onComplete({});
+  assert.equal(f.sentUserMessages.length, 1);
+  assert.deepEqual(f.sentUserMessages[0].content, [{ type: "text", text: "first" }, image, { type: "text", text: "second" }]);
 });
 
 test("context handler injects the ctx-usage hint only when useful", async () => {
