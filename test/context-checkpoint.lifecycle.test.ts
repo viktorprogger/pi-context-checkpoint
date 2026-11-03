@@ -1,7 +1,24 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import test, { after, before } from "node:test";
 
 import contextCheckpoint from "../extensions/context-checkpoint.ts";
+
+let testAgentDir: string;
+const priorAgentDir = process.env.PI_CODING_AGENT_DIR;
+
+before(async () => {
+  testAgentDir = await mkdtemp(path.join(os.tmpdir(), "pi-context-checkpoint-test-"));
+  process.env.PI_CODING_AGENT_DIR = testAgentDir;
+});
+
+after(async () => {
+  if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+  else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
+  await rm(testAgentDir, { recursive: true, force: true });
+});
 
 type AnyFn = (...args: any[]) => any;
 

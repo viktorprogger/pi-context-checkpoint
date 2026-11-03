@@ -10,6 +10,7 @@ Model-resolution precedence, persisted overrides, trust boundaries, and the `/en
 
 Generation, compaction, continuation, and recovery boundaries.
 
+- [Concise checkpoint resumption contract](2026-11-02-checkpoint-resumption-contract.md)
 - [Reduce checkpoint generation to two LLM passes](2026-09-07-two-pass-checkpoint-generation.md)
 - [Manual checkpoint command and explicit recovery boundary](2026-08-20-manual-checkpoint-command.md)
 - [Preserve Pi's native compaction history boundary](2026-08-19-preserve-native-compaction-tail.md)

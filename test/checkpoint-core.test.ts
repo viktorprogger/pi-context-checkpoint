@@ -141,6 +141,25 @@ test("prompts preserve explicit fields and enforce historical-message security",
   }
 });
 
+test("final prompt preserves continuation scope, gates, and delegated-work state", () => {
+  const final = buildFinalPrompt(fields);
+
+  assert.match(final, /limits and impacts/i);
+  assert.match(final, /current user scope/i);
+  assert.match(final, /explicit non-goals/i);
+  assert.match(final, /superseded plans as historical/i);
+  assert.match(final, /latest applicable user decisions govern next steps/i);
+
+  assert.match(final, /authorized next actions/i);
+  assert.match(final, /required clarification, approval or wait/i);
+
+  assert.match(final, /reported results from actual verification/i);
+  assert.match(final, /for delegated\/background work/i);
+  assert.match(final, /owner and known state/i);
+  assert.match(final, /unknown if unclear/i);
+  assert.match(final, /check before repeating\/relaunching/i);
+});
+
 test("structured context conversion omits the in-flight call and following messages", () => {
   const messages: any[] = [
     { role: "user", content: "historical", timestamp: 1 },
