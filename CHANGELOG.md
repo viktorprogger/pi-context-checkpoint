@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.2] - 2026-11-05
+
+### Fixed
+
+- Manual `/checkpoint` now shows checkpoint progress without automatically starting a continuation, while agent-invoked checkpoints retain automatic continuation.
+
 ## [0.3.1] - 2026-11-02
 
 ### Changed

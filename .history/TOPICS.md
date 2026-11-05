@@ -10,6 +10,7 @@ Model-resolution precedence, persisted overrides, trust boundaries, and the `/en
 
 Generation, compaction, continuation, and recovery boundaries.
 
+- [Distinguish manual and agent checkpoint continuation](2026-11-05-manual-checkpoint-ux.md)
 - [Concise checkpoint resumption contract](2026-11-02-checkpoint-resumption-contract.md)
 - [Reduce checkpoint generation to two LLM passes](2026-09-07-two-pass-checkpoint-generation.md)
 - [Manual checkpoint command and explicit recovery boundary](2026-08-20-manual-checkpoint-command.md)

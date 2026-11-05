@@ -1,5 +1,6 @@
 # History
 
+- 2026-11-05 — [Distinguish manual and agent checkpoint continuation](2026-11-05-manual-checkpoint-ux.md): Shares the in-chat processing notification while manual and agent checkpoints retain distinct continuation behavior.
 - 2026-11-02 — [Concise checkpoint resumption contract](2026-11-02-checkpoint-resumption-contract.md): Makes current user authority, real continuation gates, and conditional delegated-work evidence explicit through four existing prompt clauses.
 - 2026-10-14 — [Retry empty checkpoint-model output](2026-10-14-checkpoint-empty-output-retries.md): Retries whitespace-only nested checkpoint output up to three times per pass and preserves a model-visible failure after exhaustion.
 - 2026-10-02 — [Update the checkpoint extension for Pi 1](2026-10-02-pi-1-migration.md): Targets the Pi 1 package family and uses `session_compact_failed` to recover automatic compaction failures without a duplicate fallback compaction.

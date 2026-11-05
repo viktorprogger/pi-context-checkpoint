@@ -176,13 +176,13 @@ test("registers the manual command and runs exactly two completions after waitin
   assert.equal(f.compactCalls, 1);
 });
 
-test("manual checkpoint skips compaction for a short session and continues", async () => {
+test("manual checkpoint skips compaction for a short session and waits for user continuation", async () => {
   const f = fixture();
   f.setContextUsage({ tokens: 1 });
   await f.commands.get("checkpoint")!("", f.context());
   assert.equal(f.completions.length, 2);
   assert.equal(f.compactCalls, 0);
-  assert.equal(f.sentMessages.length, 1);
+  assert.equal(f.sentMessages.length, 0);
 });
 
 test("generation failure releases queued input", async () => {
@@ -196,13 +196,13 @@ test("generation failure releases queued input", async () => {
   assert.equal(f.sentUserMessages[0].content[0].text, "queued");
 });
 
-test("manual checkpoint compaction completion requests one continuation", async () => {
+test("manual checkpoint compaction completion waits for user continuation", async () => {
   const f = fixture();
   await f.commands.get("checkpoint")!("", f.context());
   assert.equal(f.compactCalls, 1);
   f.compactOptions.onComplete({ summary: "runtime summary" });
   f.compactOptions.onComplete({ summary: "duplicate" });
-  assert.equal(f.sentMessages.length, 1);
+  assert.equal(f.sentMessages.length, 0);
 });
 
 test("manual compaction keeps queued input locked until public completion and releases once", async () => {
@@ -237,12 +237,12 @@ test("aborted before-compaction keeps input locked until the public cancellation
   }, f.context());
   assert.deepEqual(result, { cancel: true });
   assert.equal(f.sentUserMessages.length, 0);
-  assert.equal(f.notifications.length, 0);
+  assert.equal(f.notifications.length, 1);
 
   f.compactOptions.onError(new Error("Compaction cancelled"));
   f.compactOptions.onError(new Error("Compaction cancelled"));
   assert.equal(f.sentUserMessages.length, 1);
-  assert.equal(f.notifications.length, 0);
+  assert.equal(f.notifications.length, 1);
 });
 
 test("public compaction cancellation releases input once without arming recovery", async () => {
@@ -255,9 +255,9 @@ test("public compaction cancellation releases input once without arming recovery
   f.compactOptions.onError(new Error("Compaction cancelled"));
   f.compactOptions.onError(new Error("Compaction cancelled"));
   assert.equal(f.sentUserMessages.length, 1);
-  assert.equal(f.notifications.length, 0);
+  assert.equal(f.notifications.length, 1);
   await f.commands.get("checkpoint_context_recover")!("", f.context());
-  assert.match(f.notifications[0], /No checkpoint recovery is pending/);
+  assert.match(f.notifications.at(-1) ?? "", /No checkpoint recovery is pending/);
 });
 
 test("manual checkpoint command guard avoids a second generation", async () => {
@@ -266,7 +266,7 @@ test("manual checkpoint command guard avoids a second generation", async () => {
   const second = f.commands.get("checkpoint")!("", f.context());
   await Promise.all([first, second]);
   assert.equal(f.completions.length, 2);
-  assert.match(f.notifications[0], /already generating|compacting/);
+  assert.ok(f.notifications.some((message) => /already generating|compacting/.test(message)));
 });
 
 test("recovery command warns that it is only for checkpoint compaction errors and reports no pending recovery", async () => {
@@ -274,6 +274,17 @@ test("recovery command warns that it is only for checkpoint compaction errors an
   await f.commands.get("checkpoint_context_recover")!("", f.context());
   assert.match(f.notifications[0], /No checkpoint recovery is pending/);
   assert.match(f.commandDescriptions.get("checkpoint_context_recover") ?? "", /ONLY/i);
+});
+
+test("manual and agent checkpoints show the same progress notification", async () => {
+  const manual = fixture();
+  await manual.commands.get("checkpoint")!("", manual.context());
+
+  const agent = fixture();
+  await executeCheckpoint(agent);
+
+  assert.equal(manual.notifications.length, 1);
+  assert.deepEqual(manual.notifications, agent.notifications);
 });
 
 test("registers and executes the tool with two nested completions, then persists custom compaction", async () => {
@@ -302,7 +313,7 @@ test("registers and executes the tool with two nested completions, then persists
   assert.equal(f.sentMessages.length, 0);
   compactOptions.onComplete({ summary: "runtime summary" });
   compactOptions.onComplete({ summary: "duplicate" });
-  assert.equal(f.notifications.length, 0);
+  assert.equal(f.notifications.length, 1);
   assert.equal(f.sentMessages.length, 1);
   assert.equal(f.sentMessages[0].message.customType, "checkpoint-continuation");
   assert.equal(f.sentMessages[0].message.display, false);
@@ -379,7 +390,7 @@ test("automatic compaction failure retains recovery until the agent settles", as
     fromExtension: true,
   }, f.context());
   assert.equal(f.sentUserMessages.length, 0);
-  assert.match(f.notifications[0], /checkpoint_context_recover/);
+  assert.match(f.notifications.at(-1) ?? "", /checkpoint_context_recover/);
 
   await f.events.get("agent_settled")!({}, f.context());
   assert.equal(f.sentUserMessages.length, 1);
@@ -408,7 +419,7 @@ test("known tiny session skips compaction without arming recovery", async () => 
   }, f.context());
 
   assert.equal(f.compactCalls, 0);
-  assert.equal(f.notifications.length, 0);
+  assert.equal(f.notifications.length, 1);
   assert.equal(f.sentMessages.length, 0);
   await f.events.get("agent_settled")!({}, f.context());
   assert.equal(f.sentMessages.length, 1);
@@ -428,7 +439,7 @@ test("tiny-session compaction callback is a successful no-op for races and older
   f.compactOptions.onError(new Error("Nothing to compact (session too small)"));
   f.compactOptions.onError(new Error("duplicate"));
 
-  assert.equal(f.notifications.length, 0);
+  assert.equal(f.notifications.length, 1);
   assert.equal(f.sentMessages.length, 1);
   assert.equal(f.sentMessages[0].options.deliverAs, undefined);
   await assert.doesNotReject(() => executeCheckpoint(f));
@@ -469,7 +480,7 @@ test("compaction error arms one manual recovery and the command seeds a replacem
   f.compactOptions.onError(new Error("nothing to compact"));
   f.compactOptions.onError(new Error("duplicate"));
   assert.equal(f.sentMessages.length, 0);
-  assert.match(f.notifications[0], /\/checkpoint_context_recover/);
+  assert.match(f.notifications.at(-1) ?? "", /\/checkpoint_context_recover/);
   assert.equal(f.commands.has("checkpoint_context_recover"), true);
 
   await f.commands.get("checkpoint_context_recover")!("", f.context());

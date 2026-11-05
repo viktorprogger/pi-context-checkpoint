@@ -57,8 +57,11 @@ interface CheckpointDetails {
   usage: Usage;
 }
 
+type CheckpointInitiation = "agent" | "manual";
+
 interface CheckpointState {
   toolCallId: string;
+  initiation: CheckpointInitiation;
   summary: string;
   fields: CheckpointFields;
   usage: Usage;
@@ -173,8 +176,13 @@ export default function contextCheckpoint(pi: ExtensionAPI): void {
     if (ctx.hasUI) ctx.ui.notify(message, type);
   };
 
+  const notifyCheckpointStarting = (ctx: ExtensionContext): void => {
+    notify(ctx, "Starting checkpoint processing.");
+  };
+
   const generateCheckpoint = async (
     toolCallId: string,
+    initiation: CheckpointInitiation,
     fields: CheckpointFields,
     signal: AbortSignal | undefined,
     ctx: ExtensionContext,
@@ -200,6 +208,7 @@ export default function contextCheckpoint(pi: ExtensionAPI): void {
       const combinedUsage = sumUsage([passes.draft.usage, passes.final.usage]);
       return {
         toolCallId,
+        initiation,
         summary: passes.final.text,
         fields,
         usage: combinedUsage,
@@ -220,6 +229,7 @@ export default function contextCheckpoint(pi: ExtensionAPI): void {
   };
 
   const requestContinuation = (checkpoint: CheckpointState, deliverAs?: "followUp"): void => {
+    if (checkpoint.initiation === "manual") return;
     if (continuationIssuedFor === checkpoint.toolCallId) return;
     continuationIssuedFor = checkpoint.toolCallId;
     pi.sendMessage(
@@ -434,7 +444,8 @@ export default function contextCheckpoint(pi: ExtensionAPI): void {
       }
 
       checkpointLifecycleActive = true;
-      const checkpoint = await generateCheckpoint(uuidv7(), manualCheckpointFields(), ctx.signal, ctx);
+      notifyCheckpointStarting(ctx);
+      const checkpoint = await generateCheckpoint(uuidv7(), "manual", manualCheckpointFields(), ctx.signal, ctx);
       const contextUsage = readContextUsage(ctx);
       if (contextUsage && contextUsage.tokens !== null && contextUsage.tokens <= DEFAULT_COMPACTION_SETTINGS.keepRecentTokens) {
         requestContinuation(checkpoint);
@@ -608,7 +619,8 @@ export default function contextCheckpoint(pi: ExtensionAPI): void {
       // execute() runs before the assistant tool call/result is persisted. The shared
       // generator copies only the context before that in-flight call.
       checkpointLifecycleActive = true;
-      const state = await generateCheckpoint(toolCallId, normalizeFields(params), signal, ctx);
+      notifyCheckpointStarting(ctx);
+      const state = await generateCheckpoint(toolCallId, "agent", normalizeFields(params), signal, ctx);
       waitingForTurnEnd = state;
       return checkpointResult(state);
     },
